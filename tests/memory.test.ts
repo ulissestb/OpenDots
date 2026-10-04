@@ -369,11 +369,61 @@ describe('memory extractor', () => {
     expect(parseExtraction('{"add": "nope"}')).toBeUndefined();
   });
 
+  it('runs a follow-up turn after the one in flight instead of dropping it', async () => {
+    const f = fixture();
+    const reply = (text: string) =>
+      completion({
+        role: 'assistant',
+        content: JSON.stringify({
+          add: [{ text, scope: 'global' }],
+          update: [],
+        }),
+      });
+    const network = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(reply('Lives in Lisbon'))
+      .mockResolvedValueOnce(reply('Prefers short answers'));
+    const first = f.extractor.extract(turn(f.dot.id));
+    expect(await f.extractor.extract(turn(f.dot.id))).toBe(0);
+    await first;
+    await vi.waitFor(() => expect(f.store.memories()).toHaveLength(2));
+    expect(network).toHaveBeenCalledTimes(2);
+  });
+
   it('does not call the model when automatic memory is off', async () => {
     const f = fixture();
     f.store.updateSettings({ autoMemory: false });
     const network = vi.spyOn(globalThis, 'fetch');
     expect(await f.extractor.extract(turn(f.dot.id))).toBe(0);
     expect(network).not.toHaveBeenCalled();
+  });
+});
+
+describe('memory in shared Slack channels', () => {
+  it('offers no memory tools when several Slack users act as the owner', async () => {
+    const f = fixture();
+    const shared = new DotAgent(
+      f.store,
+      f.workspace,
+      { ...config, slackUsers: ['U1', 'U2'] },
+      f.dot.id,
+      true,
+      ProviderRegistry.fromConfig(config),
+      f.extractor,
+    );
+    const network = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(completion({ role: 'assistant', content: 'Noted.' }));
+    await lastValueFrom(
+      shared.run(f.input('I live in Berlin.')).pipe(toArray()),
+    );
+    const body = requestBody(network.mock.calls[0]);
+    const names = (body.tools ?? []).map(
+      (tool: { function: { name: string } }) => tool.function.name,
+    );
+    expect(names).not.toContain('save_memory');
+    // No extraction call follows the reply.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(network).toHaveBeenCalledTimes(1);
   });
 });

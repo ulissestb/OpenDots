@@ -51,8 +51,16 @@ const normalize = (text: string) =>
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim();
 
-// One extraction per conversation at a time, across DotAgent clones.
+// One extraction per conversation at a time, across DotAgent clones. A turn
+// that finishes meanwhile waits (only the latest one) instead of being lost.
 const inFlight = new Set<string>();
+const waiting = new Map<string, ExtractionTurn>();
+type ExtractionTurn = {
+  dotId: string;
+  threadId: string;
+  user: string;
+  reply: string;
+};
 
 /** Learns durable owner memories from finished turns, after the reply. */
 export class MemoryExtractor {
@@ -72,18 +80,12 @@ export class MemoryExtractor {
     );
   }
   /** Resolves to the number of memories written; never throws. */
-  async extract(turn: {
-    dotId: string;
-    threadId: string;
-    user: string;
-    reply: string;
-  }): Promise<number> {
-    if (
-      !turn.user.trim() ||
-      !this.enabled(turn.dotId) ||
-      inFlight.has(turn.threadId)
-    )
+  async extract(turn: ExtractionTurn): Promise<number> {
+    if (!turn.user.trim() || !this.enabled(turn.dotId)) return 0;
+    if (inFlight.has(turn.threadId)) {
+      waiting.set(turn.threadId, turn);
       return 0;
+    }
     inFlight.add(turn.threadId);
     try {
       const dot = this.workspace.dot(turn.dotId)!;
@@ -158,6 +160,9 @@ export class MemoryExtractor {
       return 0;
     } finally {
       inFlight.delete(turn.threadId);
+      const next = waiting.get(turn.threadId);
+      waiting.delete(turn.threadId);
+      if (next) void this.extract(next);
     }
   }
 }

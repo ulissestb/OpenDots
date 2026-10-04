@@ -311,6 +311,7 @@ export function Chat({
             (call) =>
               call.function.name.startsWith('computer_') ||
               isMemoryTool(call.function.name) ||
+              isDelegationTool(call.function.name) ||
               call.function.name === pageReviewTool.name,
           ))),
   );

@@ -6,12 +6,15 @@ import { join } from 'node:path';
 import { lastValueFrom, toArray } from 'rxjs';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createApp } from '../src/server/app.js';
 import { DotAgent } from '../src/server/dot-agent.js';
 import {
   type McpConnect,
   McpService,
+  guardedFetch,
   mcpResultText,
   mcpToolName,
 } from '../src/server/mcp.js';
@@ -397,5 +400,95 @@ describe('MCP tools in a run', () => {
     expect(bodies[0]).toContain('untrusted data');
     expect(bodies[1]).toContain('Sunny in Recife');
     expect(bodies[2]).toContain('Refused by test.');
+  });
+});
+
+describe('MCP audit regressions', () => {
+  it('stops paging when a server repeats its cursor', async () => {
+    let pages = 0;
+    const connect: McpConnect = () => {
+      const [client, transport] = InMemoryTransport.createLinkedPair();
+      const mcp = new Server(
+        { name: 'loop', version: '1.0.0' },
+        { capabilities: { tools: {} } },
+      );
+      mcp.setRequestHandler(ListToolsRequestSchema, () => {
+        pages += 1;
+        return { tools: [], nextCursor: 'again' };
+      });
+      void mcp.connect(transport);
+      return client;
+    };
+    const f = fixture(connect);
+    const { id } = f.mcpStore.save(server);
+    const tested = await f.mcp.test(id);
+    expect(tested.lastError).toBeNull();
+    expect(pages).toBe(2);
+  });
+
+  it('keeps "all tools" when the address of a never-tested server changes', () => {
+    const f = fixture(fakeServer().connect);
+    const { id } = f.mcpStore.save({ ...server, url: 'https://typo.invalid/' });
+    const fixed = f.mcpStore.save(
+      { ...server, headers: [{ name: 'Authorization' }], allowedTools: null },
+      id,
+    );
+    expect(fixed.allowedTools).toBeNull();
+  });
+
+  it('drops a test result when the server was edited during the test', () => {
+    const f = fixture(fakeServer().connect);
+    const saved = f.mcpStore.save(server);
+    f.mcpStore.recordTest(
+      saved.id,
+      { tools: [{ name: 'stale', description: '' }] },
+      saved.updatedAt - 1,
+    );
+    expect(f.mcpStore.get(saved.id)?.tools).toEqual([]);
+    f.mcpStore.recordTest(
+      saved.id,
+      { tools: [{ name: 'fresh', description: '' }] },
+      saved.updatedAt,
+    );
+    expect(f.mcpStore.get(saved.id)?.tools).toMatchObject([{ name: 'fresh' }]);
+  });
+});
+
+describe('MCP transport fetch', () => {
+  const target = {
+    url: 'https://mcp.example.com/mcp',
+    headers: { 'X-API-Key': 'secret' },
+  };
+  it('follows same-origin redirects with headers and refuses other origins', async () => {
+    const transport = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(null, { status: 307, headers: { location: '/mcp/' } }),
+      )
+      .mockResolvedValueOnce(new Response('ok'));
+    const response = await guardedFetch(target, transport)(target.url, {
+      method: 'POST',
+    });
+    expect(await response.text()).toBe('ok');
+    const second = transport.mock.calls[1];
+    expect(String(second[0])).toBe('https://mcp.example.com/mcp/');
+    expect(new Headers(second[1]?.headers).get('x-api-key')).toBe('secret');
+    const away = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(null, {
+        status: 302,
+        headers: { location: 'https://evil.example/collect' },
+      }),
+    );
+    await expect(guardedFetch(target, away)(target.url)).rejects.toThrow(
+      'redirected to another address',
+    );
+    expect(away).toHaveBeenCalledTimes(1);
+  });
+  it('caps the response size', async () => {
+    const transport = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response('x'.repeat(100)));
+    const response = await guardedFetch(target, transport, 10)(target.url);
+    await expect(response.text()).rejects.toThrow('too large');
   });
 });

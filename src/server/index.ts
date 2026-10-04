@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { AuthService, cookieSecure, envFlag } from './auth.js';
 import { AuthStore, defaultAdmin, initialAdminPassword } from './auth-store.js';
+import { passwordProblem } from '../shared/auth.js';
 import { webSearchProvider } from './parallel.js';
 import { closeHttpServer, createShutdown } from './shutdown.js';
 import { reportChannelFailure, safeFailure } from './slack-channel.js';
@@ -25,7 +26,10 @@ import { CodexAuth } from './providers/codex-auth.js';
 import { ProviderRegistry } from './providers/registry.js';
 import { SqliteAgentRunner } from './sqlite-runner.js';
 const host = process.env.HOST ?? '127.0.0.1';
-const port = Number(process.env.PORT ?? 4310);
+// An empty or invalid PORT would bind a random port that self-calls miss.
+const port = Number(process.env.PORT?.trim() || 4310);
+if (!Number.isInteger(port) || port < 1 || port > 65535)
+  throw new Error('PORT must be a TCP port number between 1 and 65535.');
 const ownerToken = process.env.OWNER_TOKEN || undefined;
 const configuredOrigin =
   process.env.APP_ORIGIN ||
@@ -61,13 +65,25 @@ if (authStore.seeded && seed.generated)
     `\n*** OpenDots created the admin user with a one-time password: ${seed.password}\n*** Sign in as ${defaultAdmin.username} with it and choose a new password. It is not shown again. ***\n`,
   );
 if (process.env.ADMIN_PASSWORD_RESET) {
-  authStore.resetPassword(
-    defaultAdmin.username,
+  const problem = passwordProblem(
     process.env.ADMIN_PASSWORD_RESET,
+    defaultAdmin.username,
   );
-  console.warn(
-    'Admin password reset from ADMIN_PASSWORD_RESET; remove it from the environment.',
-  );
+  if (problem)
+    console.error(`ADMIN_PASSWORD_RESET was not applied: ${problem}`);
+  else if (
+    authStore.resetPasswordOnce(
+      defaultAdmin.username,
+      process.env.ADMIN_PASSWORD_RESET,
+    )
+  )
+    console.warn(
+      'Admin password reset from ADMIN_PASSWORD_RESET; remove it from the environment.',
+    );
+  else
+    console.warn(
+      'ADMIN_PASSWORD_RESET was already applied and is ignored; remove it from the environment.',
+    );
 }
 if (authStore.isDefaultPassword())
   console.warn(
@@ -94,6 +110,8 @@ const workspace = new WorkspaceStore(
   database,
   process.env.OWNER_ID ?? 'opendots-owner',
 );
+// Live call sessions are held in memory, so calls open at startup are dead.
+workspace.failOrphanedCalls();
 const config: PlatformConfig = {
   intelligenceKey: process.env.INTELLIGENCE_API_KEY,
   intelligenceApiUrl: process.env.INTELLIGENCE_API_URL || undefined,
@@ -156,16 +174,20 @@ const researchConfig = {
 const runner = new Runner(
   store,
   researchConfig,
-  async (claim, _memories, signal, progress) => {
+  async (claim, _memories, signal, progress, started) => {
     const threadId = workspace.taskThread(claim.id);
     if (!threadId)
       throw new Error(
         'This legacy task has no Intelligence conversation. Create a new scheduled task from a conversation.',
       );
     progress('Running this task in its Intelligence conversation.');
-    const text = await platform.turn(threadId, claim.prompt, signal, {
-      opendotsSource: 'scheduled',
-    });
+    const text = await platform.turn(
+      threadId,
+      claim.prompt,
+      signal,
+      { opendotsSource: 'scheduled' },
+      { onStart: started },
+    );
     return { text, sources: [], sample: false };
   },
 );

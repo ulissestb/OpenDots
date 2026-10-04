@@ -220,8 +220,10 @@ export class VoiceService {
     const pending = this.platform.turn(
       call.threadId,
       request,
-      AbortSignal.any([job.controller.signal, AbortSignal.timeout(90_000)]),
+      job.controller.signal,
       { opendotsSource: 'voice_compute' },
+      // Counted from the start: a task queued behind another keeps its budget.
+      { timeoutMs: 90_000 },
     );
     job.calls.set(toolCallId, pending);
     return pending;
@@ -269,12 +271,23 @@ export class VoiceService {
       );
     }
   }
-  async resumePending() {
-    for (const call of this.platform.workspace.calls())
+  private resuming?: Promise<void>;
+  /** Syncs held receipts; overlapping calls share one pass. */
+  resumePending() {
+    this.resuming ??= this.resumeAll().finally(() => {
+      this.resuming = undefined;
+    });
+    return this.resuming;
+  }
+  private async resumeAll() {
+    for (const { id } of this.platform.workspace.calls()) {
+      // Re-read: an earlier sync in this pass may have taken a while.
+      const call = this.platform.workspace.call(id);
       if (call.error?.includes('pending Intelligence sync')) {
         this.platform.workspace.setCallError(call.id, null);
         await this.syncReceipt(call.id, call.transcript);
       }
+    }
   }
   private async hangup(id: string, explicitProvider?: VoiceCall) {
     const provider = explicitProvider ?? this.jobs.get(id)?.provider;

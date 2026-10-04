@@ -98,11 +98,7 @@ export class Store {
       this.db
         .prepare('UPDATE settings SET value=? WHERE id=1')
         .run(JSON.stringify(settings));
-      if (
-        (!previous.paused && settings.paused) ||
-        (previous.researchAllowed && !settings.researchAllowed) ||
-        (previous.memoryAllowed && !settings.memoryAllowed)
-      ) {
+      if (settingsInterruptRuns(previous, settings)) {
         const running = this.tasks().filter((t) => t.status === 'running');
         for (const task of running) {
           this.invalidate(
@@ -255,6 +251,16 @@ export class Store {
       this.event(task.id, lease, 'Research worker started.');
       return { ...this.task(task.id)!, lease };
     });
+  }
+  /** Extends a held lease; false once the claim is no longer owned. */
+  renew(claim: Claim, until: number): boolean {
+    return (
+      this.db
+        .prepare(
+          "UPDATE tasks SET leaseUntil=? WHERE id=? AND lease=? AND status='running'",
+        )
+        .run(until, claim.id, claim.lease).changes > 0
+    );
   }
   owns(claim: Claim): boolean {
     const task = this.task(claim.id);
@@ -427,4 +433,17 @@ export class Store {
       this.db.prepare('DELETE FROM memories WHERE id=?').run(id).changes > 0
     );
   }
+}
+/**
+ * Settings changes that stop running work. The store requeues running tasks
+ * for these, so the runner's abort is a restart rather than a failure.
+ */
+export function settingsInterruptRuns(previous: Settings, next: Settings) {
+  return (
+    (!previous.paused && next.paused) ||
+    (previous.researchAllowed && !next.researchAllowed) ||
+    previous.memoryAllowed !== next.memoryAllowed ||
+    (previous.modelProvider ?? null) !== (next.modelProvider ?? null) ||
+    (previous.model ?? null) !== (next.model ?? null)
+  );
 }

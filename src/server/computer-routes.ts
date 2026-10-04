@@ -5,15 +5,9 @@ import type { ComputerAction } from '../shared/computer-types.js';
 export function computerRoutes(computers: ComputerService) {
   const app = new Hono();
   app.onError((error, c) =>
-    c.json(
-      {
-        error:
-          error instanceof z.ZodError
-            ? 'Invalid computer request.'
-            : error.message,
-      },
-      400,
-    ),
+    error instanceof z.ZodError || error instanceof SyntaxError
+      ? c.json({ error: 'Invalid computer request.' }, 400)
+      : c.json({ error: error.message }, computerErrorStatus(error.message)),
   );
   app.get('/dots/:id/computer', async (c) =>
     c.json(await computers.status(c.req.param('id'))),
@@ -49,4 +43,24 @@ export function computerRoutes(computers: ComputerService) {
     );
   });
   return app;
+}
+/** Request and permission problems are 4xx; supervisor trouble is 5xx. */
+function computerErrorStatus(message: string) {
+  if (message === 'Dot not found.') return 404;
+  if (/^(Unknown computer action|Invalid computer namespace)/.test(message))
+    return 400;
+  if (
+    /^(Computer permission is disabled|Agents are paused|Human controls are owner-only)/.test(
+      message,
+    )
+  )
+    return 403;
+  if (
+    /^(There is no active control request|Start this Dot|Computer service returned HTTP 409)/.test(
+      message,
+    )
+  )
+    return 409;
+  if (message === 'Computer service is not configured.') return 503;
+  return 502;
 }

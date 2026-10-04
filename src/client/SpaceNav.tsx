@@ -22,6 +22,8 @@ export function SpaceNav({
     if (!expanded) return;
     let current = true;
     const load = async () => {
+      // Skip polls while the tab is hidden; visibilitychange refreshes on return.
+      if (document.hidden) return;
       try {
         const next = await api<Page[]>(`/spaces/${space.id}/pages`);
         if (current) {
@@ -34,9 +36,12 @@ export function SpaceNav({
     };
     void load();
     const timer = setInterval(() => void load(), 3000);
+    const visible = () => void load();
+    document.addEventListener('visibilitychange', visible);
     return () => {
       current = false;
       clearInterval(timer);
+      document.removeEventListener('visibilitychange', visible);
     };
   }, [expanded, space.id]);
   const branches = (parentId: string | null, depth = 0): React.ReactNode =>

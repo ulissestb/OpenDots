@@ -76,3 +76,44 @@ export function usageSummary(usage: ConversationUsage) {
     parts.push(`${formatTokens(usage.contextWindow)} context`);
   return parts.join(' · ');
 }
+
+/**
+ * Backdrop handlers that close a modal only for a click that both starts and
+ * ends on the backdrop. A text selection dragged out of the modal ends with a
+ * click on the backdrop too, and must not discard the form.
+ */
+export function backdropHandlers(onClose: () => void) {
+  type Target = { target: unknown; currentTarget: { dataset: DOMStringMap } };
+  return {
+    onMouseDown: (event: Target) => {
+      event.currentTarget.dataset.pressed = String(
+        event.target === event.currentTarget,
+      );
+    },
+    onClick: (event: Target) => {
+      const pressed = event.currentTarget.dataset.pressed;
+      delete event.currentTarget.dataset.pressed;
+      // No mousedown recorded (keyboard or synthetic click): close as before.
+      if (event.target === event.currentTarget && pressed !== 'false')
+        onClose();
+    },
+  };
+}
+
+/**
+ * True while the session-expired sign-in overlay is up (or the event came from
+ * inside it). Dialog Escape handlers must ignore keys then: the overlay sits on
+ * top, and closing the dialog underneath would discard its form.
+ */
+export function sessionOverlayOpen(target?: unknown) {
+  const element = target as { closest?: (selector: string) => unknown };
+  if (
+    typeof element?.closest === 'function' &&
+    element.closest('.session-overlay')
+  )
+    return true;
+  return (
+    typeof document !== 'undefined' &&
+    !!document.querySelector('.session-overlay')
+  );
+}

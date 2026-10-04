@@ -25,20 +25,73 @@ export type McpConnect = (
   kind: 'streamable' | 'sse',
 ) => Transport;
 
-const defaultConnect: McpConnect = (server, kind) => {
-  const options = { requestInit: { headers: server.headers } };
-  return kind === 'streamable'
-    ? new StreamableHTTPClientTransport(new URL(server.url), options)
-    : new SSEClientTransport(new URL(server.url), {
-        ...options,
-        // SSE opens with GET; EventSource needs the headers separately.
-        eventSourceInit: {
-          fetch: (url, init) =>
-            fetch(url, {
-              ...init,
-              headers: { ...init?.headers, ...server.headers },
-            }),
+/** Bytes one MCP connection may receive; larger replies are refused. */
+export const mcpResponseLimit = 16 * 1024 * 1024;
+/**
+ * fetch for MCP transports. Redirects are followed only within the server's
+ * origin, so its header credentials never reach another host, and response
+ * bodies are capped instead of being buffered without limit.
+ */
+export function guardedFetch(
+  server: Pick<McpServerRecord, 'url' | 'headers'>,
+  transport: typeof fetch = fetch,
+  limit = mcpResponseLimit,
+) {
+  const origin = new URL(server.url).origin;
+  return async (input: string | URL, init?: RequestInit) => {
+    // The SDK passes a Headers instance, which object spread drops.
+    const headers = new Headers(init?.headers);
+    for (const [name, value] of Object.entries(server.headers))
+      headers.set(name, value);
+    let url = new URL(String(input));
+    let response: Response | undefined;
+    for (let hop = 0; hop < 5; hop += 1) {
+      response = await transport(url, {
+        ...init,
+        headers,
+        redirect: 'manual',
+      });
+      const location = response.headers.get('location');
+      if (response.status < 300 || response.status > 399 || !location) break;
+      const next = new URL(location, url);
+      if (next.origin !== origin)
+        throw new Error(
+          'The MCP server redirected to another address; update its URL.',
+        );
+      url = next;
+    }
+    if (!response?.body || [204, 205, 304].includes(response.status))
+      return response!;
+    let received = 0;
+    const capped = response.body.pipeThrough(
+      new TransformStream<Uint8Array, Uint8Array>({
+        transform(chunk, controller) {
+          received += chunk.byteLength;
+          if (received > limit)
+            controller.error(
+              new Error('The MCP server response is too large.'),
+            );
+          else controller.enqueue(chunk);
         },
+      }),
+    );
+    return new Response(capped, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+  };
+}
+const defaultConnect: McpConnect = (server, kind) => {
+  const guarded = guardedFetch(server);
+  return kind === 'streamable'
+    ? new StreamableHTTPClientTransport(new URL(server.url), {
+        fetch: guarded,
+      })
+    : new SSEClientTransport(new URL(server.url), {
+        fetch: guarded,
+        // SSE opens with GET; EventSource takes its own fetch.
+        eventSourceInit: { fetch: guarded },
       });
 };
 /** A tool name the model APIs accept: ^[A-Za-z0-9_-]{1,64}$. */
@@ -121,6 +174,7 @@ export class McpService {
   }
   private async listTools(client: Client, signal?: AbortSignal) {
     const tools: LiveTool[] = [];
+    const seen = new Set<string>();
     let cursor: string | undefined;
     do {
       const page = await client.listTools(cursor ? { cursor } : undefined, {
@@ -129,7 +183,10 @@ export class McpService {
       });
       tools.push(...(page.tools as LiveTool[]));
       cursor = page.nextCursor;
-    } while (cursor && tools.length < 1000);
+      // A server that repeats a cursor would otherwise page forever.
+      if (cursor && seen.has(cursor)) break;
+      if (cursor) seen.add(cursor);
+    } while (cursor && tools.length < 1000 && seen.size < 50);
     return tools;
   }
   /** Connects, lists tools, and stores them for the owner to review. */
@@ -144,10 +201,18 @@ export class McpService {
         until: Date.now() + listTtlMs,
         tools,
       });
-      return this.store.recordTest(id, { tools: tools.map(toolInfo) });
+      return this.store.recordTest(
+        id,
+        { tools: tools.map(toolInfo) },
+        server.updatedAt,
+      );
     } catch (error) {
       signal?.throwIfAborted();
-      return this.store.recordTest(id, { error: safeMessage(error) });
+      return this.store.recordTest(
+        id,
+        { error: safeMessage(error) },
+        server.updatedAt,
+      );
     } finally {
       await client?.close().catch(() => undefined);
     }
@@ -157,7 +222,16 @@ export class McpService {
    * reviewed (and allowed). Servers that fail are skipped and reported.
    * Call close() when the run ends.
    */
-  async toolsFor(dotId: string, signal: AbortSignal, check: () => void) {
+  async toolsFor(
+    dotId: string,
+    signal: AbortSignal,
+    check: () => void,
+    /** Dots that must also have each server (a delegated run's delegators). */
+    sharedWith: string[] = [],
+  ) {
+    const shared = sharedWith.map(
+      (id) => new Set(this.store.forDot(id).map((server) => server.id)),
+    );
     const clients = new Map<string, Promise<Client>>();
     const client = (server: McpServerRecord) => {
       let pending = clients.get(server.id);
@@ -169,10 +243,21 @@ export class McpService {
       }
       return pending;
     };
+    const close = async () => {
+      await Promise.all(
+        [...clients.values()].map((pending) =>
+          pending.then((item) => item.close()).catch(() => undefined),
+        ),
+      );
+    };
     const unavailable: string[] = [];
     const tools = [];
     const taken = new Set<string>();
-    for (const server of this.store.forDot(dotId)) {
+    // An abort while listing must not leave the opened connections behind.
+    signal.addEventListener('abort', () => void close(), { once: true });
+    for (const server of this.store
+      .forDot(dotId)
+      .filter((item) => shared.every((ids) => ids.has(item.id)))) {
       const reviewed = new Set(
         server.allowedTools ?? server.tools.map((tool) => tool.name),
       );
@@ -231,13 +316,7 @@ export class McpService {
     return {
       tools,
       unavailable,
-      close: async () => {
-        await Promise.all(
-          [...clients.values()].map((pending) =>
-            pending.then((item) => item.close()).catch(() => undefined),
-          ),
-        );
-      },
+      close,
     };
   }
 }

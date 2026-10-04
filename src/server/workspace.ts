@@ -463,9 +463,23 @@ export class WorkspaceStore {
   }
   anchorCall(id: string, anchor: string | undefined) {
     this.call(id);
+    // A retried end on an ended call must not move its receipt.
     this.db
-      .prepare('UPDATE calls SET anchorMessageId=? WHERE id=?')
+      .prepare(
+        'UPDATE calls SET anchorMessageId=? WHERE id=? AND (endedAt IS NULL OR anchorMessageId IS NULL)',
+      )
       .run(anchor ?? null, id);
+  }
+  /**
+   * Calls left open by a previous process. Their sessions lived in memory, so
+   * after a restart they can never resume; close them as failed.
+   */
+  failOrphanedCalls() {
+    return this.db
+      .prepare(
+        "UPDATE calls SET status='failed', endedAt=?, error=COALESCE(error, 'The server restarted during this call.') WHERE endedAt IS NULL",
+      )
+      .run(Date.now()).changes;
   }
   setCallError(id: string, error: string | null) {
     this.call(id);

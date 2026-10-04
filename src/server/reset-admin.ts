@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { AuthStore, defaultAdmin } from './auth-store.js';
 import { passwordProblem } from '../shared/auth.js';
@@ -23,9 +24,16 @@ if (problem) {
   console.error(problem);
   process.exit(1);
 }
-const store = new AuthStore(
-  process.env.DATABASE_PATH ?? 'data/opendots.sqlite',
-);
+const database = process.env.DATABASE_PATH ?? 'data/opendots.sqlite';
+// Opening a missing path would create a fresh database and reset its admin,
+// leaving the real one untouched.
+if (!existsSync(database)) {
+  console.error(
+    `No database at ${database}. Run this from the OpenDots directory or set DATABASE_PATH.`,
+  );
+  process.exit(1);
+}
+const store = new AuthStore(database);
 store.resetPassword(defaultAdmin.username, password);
 store.close();
 console.log(

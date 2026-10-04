@@ -191,6 +191,30 @@ it('defers paused transcript synchronization and resumes it once without a dupli
   expect(f.workspace.call(call.id).status).toBe('failed');
 });
 
+it('does not duplicate receipts when resumes overlap', async () => {
+  const f = fixture();
+  for (const text of ['First call', 'Second call']) {
+    const call = f.workspace.createCall('thread');
+    f.workspace.setCall(call.id, 'ended', text);
+    f.workspace.setCallError(call.id, 'Receipt pending Intelligence sync.');
+  }
+  await Promise.all([f.voice.resumePending(), f.voice.resumePending()]);
+  expect(f.turn).toHaveBeenCalledTimes(2);
+});
+
+it('closes calls left open by a previous process and keeps ended anchors', () => {
+  const f = fixture();
+  const open = f.workspace.createCall('thread');
+  expect(f.workspace.failOrphanedCalls()).toBe(1);
+  expect(f.workspace.call(open.id)).toMatchObject({ status: 'failed' });
+  expect(f.workspace.call(open.id).endedAt).not.toBeNull();
+  f.workspace.anchorCall(open.id, 'first');
+  f.workspace.anchorCall(open.id, 'second');
+  expect(
+    (f.workspace.call(open.id) as { anchorMessageId?: string }).anchorMessageId,
+  ).toBe('first');
+});
+
 it('reports rejected provider hangup status without exposing its response body', async () => {
   const f = fixture();
   const call = await f.voice.begin(
@@ -302,5 +326,6 @@ it('lets ChatGPT voice calls delegate tasks to the Dot agent', async () => {
     'Make a page',
     expect.any(AbortSignal),
     { opendotsSource: 'voice_compute' },
+    { timeoutMs: 90_000 },
   );
 });

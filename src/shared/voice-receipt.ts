@@ -5,6 +5,8 @@ export const voiceReceiptMessagePrefix = 'opendots:voice_receipt:';
 // Dot-to-Dot delegation) carries this prefix so learning features can skip
 // non-owner turns.
 export const internalMessagePrefix = 'opendots:';
+/** The id prefix of a prompt one Dot sends another through delegation. */
+export const delegationMessagePrefix = `${internalMessagePrefix}delegation:`;
 const internalSources = [
   'voice_receipt',
   'scheduled',

@@ -124,3 +124,29 @@ it('survives database errors in the scheduler tick', async () => {
   errors.mockRestore();
   store.close();
 });
+
+it('restarts the time budget and lease when a queued turn starts', async () => {
+  vi.useFakeTimers();
+  try {
+    const store = new Store(':memory:');
+    const runner = new Runner(
+      store,
+      { ...config, runTimeoutMs: 1000 },
+      async (_claim, _memories, signal, _progress, started) => {
+        // Waiting 12 s behind another turn, then 12 s of work: 24 s in all,
+        // over the 16 s budget, but within it from the start.
+        await vi.advanceTimersByTimeAsync(12_000);
+        started();
+        await vi.advanceTimersByTimeAsync(12_000);
+        signal.throwIfAborted();
+        return { text: 'Done', sources: [], sample: false };
+      },
+    );
+    store.createTask('Queued task');
+    await runner.tick();
+    expect(store.tasks()[0].status).toBe('completed');
+    store.close();
+  } finally {
+    vi.useRealTimers();
+  }
+});

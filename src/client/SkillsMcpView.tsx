@@ -14,7 +14,11 @@ import type { McpServerInfo } from '../shared/mcp';
 import { parseSkillMarkdown, skillLimits, type Skill } from '../shared/skills';
 import type { Dot } from '../shared/types';
 import { api } from './api';
-import { isCoarsePointer } from './ui-helpers';
+import {
+  backdropHandlers,
+  isCoarsePointer,
+  sessionOverlayOpen,
+} from './ui-helpers';
 import {
   availabilityLabel,
   collectSkillFiles,
@@ -375,7 +379,8 @@ function Modal({
         ?.querySelector<HTMLElement>('input:not([type="file"]),textarea')
         ?.focus();
     const key = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') close.current();
+      if (event.key === 'Escape' && !sessionOverlayOpen(event.target))
+        close.current();
       if (event.key === 'Tab') {
         const items = [
           ...(container.current?.querySelectorAll<HTMLElement>(
@@ -398,7 +403,10 @@ function Modal({
     };
   }, []);
   return (
-    <div className="modal-backdrop" onClick={() => close.current()}>
+    <div
+      className="modal-backdrop"
+      {...backdropHandlers(() => close.current())}
+    >
       <section
         className="modal wide"
         role="dialog"

@@ -1,9 +1,11 @@
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
+  backdropHandlers,
   isCoarsePointer,
   isNearBottom,
   matchesMedia,
+  sessionOverlayOpen,
   shouldSendOnEnter,
   sourceHost,
 } from '../src/client/ui-helpers';
@@ -68,4 +70,35 @@ it('explains an expired session on the sign-in overlay', () => {
   );
   expect(html).toContain('Your session ended.');
   expect(html).not.toContain('Sign in to OpenDots.');
+});
+
+describe('backdropHandlers', () => {
+  const backdrop = () => ({ dataset: {} as DOMStringMap });
+  it('closes only for a click that starts and ends on the backdrop', () => {
+    const onClose = vi.fn();
+    const handlers = backdropHandlers(onClose);
+    const target = backdrop();
+    handlers.onMouseDown({ target: {}, currentTarget: target });
+    handlers.onClick({ target, currentTarget: target });
+    expect(onClose).not.toHaveBeenCalled();
+    handlers.onMouseDown({ target, currentTarget: target });
+    handlers.onClick({ target, currentTarget: target });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    handlers.onClick({ target: {}, currentTarget: target });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+it('ignores dialog Escape while the session overlay is open', () => {
+  const inside = {
+    closest: (selector: string) => selector === '.session-overlay',
+  };
+  const outside = { closest: () => null };
+  let overlay: unknown = null;
+  vi.stubGlobal('document', { querySelector: () => overlay });
+  expect(sessionOverlayOpen(outside)).toBe(false);
+  expect(sessionOverlayOpen(undefined)).toBe(false);
+  expect(sessionOverlayOpen(inside)).toBe(true);
+  overlay = {};
+  expect(sessionOverlayOpen(outside)).toBe(true);
 });

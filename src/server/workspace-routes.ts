@@ -231,6 +231,8 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
   });
   app.all('/copilotkit/*', (c) => platform.handle(c.req.raw));
   app.onError((error, c) => {
+    if (error instanceof SyntaxError)
+      return c.json({ error: 'Invalid JSON request.' }, 400);
     const text = error.message;
     const known =
       /^(Setup|Voice setup|Dot |Space |Specialist |Conversation |Call |This call|End the current|Voice provider|An audio|Intelligence could not)/.test(
@@ -242,8 +244,24 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
           ? text
           : 'The service request failed. Check the server configuration and try again.',
       },
-      503,
+      known ? requestErrorStatus(text) : 503,
     );
   });
   return app;
+}
+/** Client mistakes and state conflicts are not service outages. */
+function requestErrorStatus(text: string) {
+  if (/not found\.$/.test(text)) return 404;
+  if (
+    /^(Conversation does not belong|Space access has been revoked)/.test(text)
+  )
+    return 403;
+  if (/^(An audio|Space access must include)/.test(text)) return 400;
+  if (
+    /^(Dot is paused|This call has ended|Call session expired|End the current call)/.test(
+      text,
+    )
+  )
+    return 409;
+  return 503;
 }

@@ -178,3 +178,48 @@ it('grants multiple Spaces without changing thread identity and enforces revocat
   );
   ws.close();
 });
+it('skips call receipts and does not label server prompts as the owner', async () => {
+  const ws = new WorkspaceStore(':memory:', 'owner');
+  const dot = ws.dots()[0];
+  ws.bindThread('thread', dot.id, 'Thread');
+  const service = new PageService(ws, () => ({
+    getOrCreateThread: async () => {},
+    getThreadMessages: async () => ({
+      messages: [
+        { id: 'u1', role: 'user', content: 'Mine' },
+        {
+          id: 'opendots:voice_receipt:r1',
+          role: 'user',
+          content: 'Call ended after 5 seconds.',
+        },
+        { id: 'opendots:scheduled:s1', role: 'user', content: 'Daily digest' },
+        { id: 'a1', role: 'assistant', content: 'Reply' },
+      ],
+    }),
+  }));
+  const page = await service.saveConversation('thread', 'Saved', null);
+  expect(page.content).toBe(
+    '## You\n\nMine\n\n## Automated request\n\nDaily digest\n\n## Dot\n\nReply',
+  );
+  ws.close();
+});
+it('keeps a page conversation usable after its Space is revoked', async () => {
+  const ws = new WorkspaceStore(':memory:', 'owner');
+  const dot = ws.dots()[0];
+  const other = ws.createSpace('Launch', '');
+  const page = ws.pages.create(other.id, { title: 'Brief' });
+  ws.updateDot(dot.id, { ...dot, spaceIds: [dot.spaceId, other.id] });
+  const service = new PageService(ws, () => ({
+    getOrCreateThread: async () => {},
+    getThreadMessages: async () => ({ messages: [] }),
+  }));
+  const thread = await service.conversation(other.id, page.id, dot.id);
+  const access = pageAccess(ws, dot.spaceId, thread.id, () => {});
+  expect(access.context()?.id).toBe(page.id);
+  ws.updateDot(dot.id, { ...dot, spaceIds: [dot.spaceId] });
+  // No page context and no crash; default-Space tools still work.
+  expect(access.context()).toBeUndefined();
+  expect(access.list()).toEqual([]);
+  expect(() => access.read(page.id, other.id)).toThrow(/access/);
+  ws.close();
+});

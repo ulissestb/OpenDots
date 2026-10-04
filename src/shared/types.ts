@@ -95,7 +95,10 @@ export interface Dot {
   createdAt: number;
   learningContainerId?: string | null;
   skillDeliveryEnabled?: boolean;
-  /** May hand tasks to other Dots, which run under their own permissions. */
+  /**
+   * May hand tasks to other Dots. A delegated run gets only what both Dots may
+   * do: Spaces, research, computer capabilities and MCP servers they share.
+   */
   delegationAllowed: boolean;
   /** May create and update its own skills. */
   skillAuthoringAllowed: boolean;

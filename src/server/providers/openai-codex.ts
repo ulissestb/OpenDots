@@ -116,7 +116,11 @@ export function completedOutput(): TransformStream<Uint8Array, Uint8Array> {
   };
   return new TransformStream({
     transform(chunk, controller) {
-      buffer += decoder.decode(chunk, { stream: true }).replace(/\r\n/g, '\n');
+      // Normalize the joined buffer: a CRLF can straddle two chunks.
+      buffer = (buffer + decoder.decode(chunk, { stream: true })).replace(
+        /\r\n/g,
+        '\n',
+      );
       let end: number;
       while ((end = buffer.indexOf('\n\n')) >= 0) {
         controller.enqueue(

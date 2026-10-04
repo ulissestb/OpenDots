@@ -33,6 +33,26 @@ interface Row {
   createdAt: number;
   updatedAt: number;
 }
+// Replay keeps the most recent runs; the message snapshot keeps full history.
+const maxStoredRuns = 200;
+/**
+ * Bounds what each save rewrites: per-run tool schemas, context and state in
+ * RUN_STARTED inputs are not needed for replay, and old runs are dropped.
+ */
+export function trimEvents(events: BaseEvent[]): BaseEvent[] {
+  const starts: number[] = [];
+  const trimmed = events.map((event, index) => {
+    if (event.type !== EventType.RUN_STARTED) return event;
+    starts.push(index);
+    const started = event as BaseEvent & { input?: Record<string, unknown> };
+    if (!started.input) return event;
+    const { messages, threadId, runId } = started.input;
+    return { ...started, input: { threadId, runId, messages } } as BaseEvent;
+  });
+  return starts.length > maxStoredRuns
+    ? trimmed.slice(starts[starts.length - maxStoredRuns])
+    : trimmed;
+}
 const messageId = (event: BaseEvent) =>
   'messageId' in event && typeof event.messageId === 'string'
     ? event.messageId
@@ -74,10 +94,12 @@ export class SqliteAgentRunner extends AgentRunner {
   ) {
     const previous = this.row(threadId);
     const time = Date.now();
-    const all = compactEvents([
-      ...(previous ? (JSON.parse(previous.events) as BaseEvent[]) : []),
-      ...events,
-    ]);
+    const all = trimEvents(
+      compactEvents([
+        ...(previous ? (JSON.parse(previous.events) as BaseEvent[]) : []),
+        ...events,
+      ]),
+    );
     this.db
       .prepare(
         'INSERT INTO local_threads VALUES (?,?,?,?,?,?) ON CONFLICT(threadId) DO UPDATE SET agentId=excluded.agentId, events=excluded.events, messages=excluded.messages, updatedAt=excluded.updatedAt',
@@ -108,7 +130,10 @@ export class SqliteAgentRunner extends AgentRunner {
         console.error('Failed to abort superseded run', error);
       }
     }
-    const historic = new Set<string>();
+    // Seeded from the full snapshot too: replay events keep only recent runs.
+    const historic = new Set<string>(
+      this.getThreadMessages(request.threadId).map((message) => message.id),
+    );
     for (const event of this.events(request.threadId)) {
       const id = messageId(event);
       if (id) historic.add(id);
@@ -199,6 +224,20 @@ export class SqliteAgentRunner extends AgentRunner {
       });
     else connection.complete();
     return connection.asObservable();
+  }
+  /**
+   * Resolves once no run is streaming on the thread. Server turns wait here so
+   * they do not supersede (and erase) a reply the owner is watching.
+   */
+  async idle(threadId: string): Promise<void> {
+    for (
+      let live = this.live.get(threadId);
+      live;
+      live = this.live.get(threadId)
+    )
+      await new Promise<void>((resolve) =>
+        live!.subject.subscribe({ complete: resolve, error: () => resolve() }),
+      );
   }
   isRunning(request: AgentRunnerIsRunningRequest): Promise<boolean> {
     return Promise.resolve(this.live.has(request.threadId));

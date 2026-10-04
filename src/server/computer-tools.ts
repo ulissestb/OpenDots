@@ -78,18 +78,30 @@ export function computerTools(
   dotId: string,
   check: () => void,
   signal: AbortSignal,
+  /** Further limits capabilities (a delegated run: the delegating Dots'). */
+  allowKind: (kind: 'browser' | 'files' | 'shell') => boolean = () => true,
 ) {
-  return (Object.keys(descriptions) as AgentAction[]).map((name) =>
-    defineTool({
-      name: `computer_${name}`,
-      description: `${descriptions[name]} ${common}`,
-      parameters: computerInputs[name],
-      execute: async (input: unknown) => {
-        check();
-        return limitToolResult(
-          await service.action(dotId, name, input, 'agent', signal),
-        );
-      },
-    }),
-  );
+  return (Object.keys(descriptions) as AgentAction[])
+    .filter((name) =>
+      allowKind(
+        name === 'exec'
+          ? 'shell'
+          : name.startsWith('files_')
+            ? 'files'
+            : 'browser',
+      ),
+    )
+    .map((name) =>
+      defineTool({
+        name: `computer_${name}`,
+        description: `${descriptions[name]} ${common}`,
+        parameters: computerInputs[name],
+        execute: async (input: unknown) => {
+          check();
+          return limitToolResult(
+            await service.action(dotId, name, input, 'agent', signal),
+          );
+        },
+      }),
+    );
 }

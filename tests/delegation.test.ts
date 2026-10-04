@@ -59,12 +59,16 @@ function toolCall(name: string, args: Record<string, unknown>, id = 'call') {
     'tool_calls',
   );
 }
-const runInput = (threadId: string, content: string): RunAgentInput => ({
+const runInput = (
+  threadId: string,
+  content: string,
+  id = 'user',
+): RunAgentInput => ({
   threadId,
   runId: 'run',
   state: {},
   context: [],
-  messages: [{ id: 'user', role: 'user', content }],
+  messages: [{ id, role: 'user', content }],
   tools: [],
   forwardedProps: {},
 });
@@ -357,7 +361,13 @@ describe('DotAgent delegation', () => {
     const events = await lastValueFrom(
       f
         .agent(f.researcher.id)
-        .run(runInput('child', 'Task delegated by the Dot Lead Dot'))
+        .run(
+          runInput(
+            'child',
+            'Task delegated by the Dot Lead Dot',
+            'opendots:delegation:1',
+          ),
+        )
         .pipe(toArray()),
     );
     const body = requestBody(network.mock.calls[0]);
@@ -367,6 +377,55 @@ describe('DotAgent delegation', () => {
     const names = body.tools?.map((tool) => tool.function.name) ?? [];
     expect(names).not.toContain('save_memory');
     expect(events.at(-1)).toMatchObject({ type: EventType.RUN_ERROR });
+  });
+
+  it('limits a delegated run to what the delegating Dot may do', async () => {
+    const f = agentFixture({
+      context: (threadId) =>
+        threadId === 'child'
+          ? {
+              depth: 1,
+              chain: [f.lead.id],
+              deadline: Date.now() + 60_000,
+              fromDotId: f.lead.id,
+              fromDotName: 'Lead Dot',
+              parentThreadId: 'parent',
+              signal: new AbortController().signal,
+            }
+          : undefined,
+      delegate: vi.fn(),
+    });
+    f.store.updateSettings({ memoryAllowed: false });
+    const secret = f.workspace.createSpace('Secret', '');
+    f.workspace.updateDot(f.researcher.id, {
+      ...f.researcher,
+      spaceIds: [f.researcher.spaceId, secret.id],
+    });
+    f.workspace.bindThread('child', f.researcher.id, 'Child');
+    const network = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(toolCall('list_authorized_spaces', {}, 'spaces'))
+      .mockResolvedValueOnce(completion({ role: 'assistant', content: 'Ok.' }))
+      .mockResolvedValueOnce(completion({ role: 'assistant', content: 'Hi.' }));
+    await lastValueFrom(
+      f
+        .agent(f.researcher.id)
+        .run(runInput('child', 'Delegated task', 'opendots:delegation:1'))
+        .pipe(toArray()),
+    );
+    const delegated = requestBody(network.mock.calls[1]);
+    expect(JSON.stringify(delegated.messages)).not.toContain(secret.id);
+    // The owner writing in the same conversation is not a delegated run.
+    await lastValueFrom(
+      f
+        .agent(f.researcher.id)
+        .run(runInput('child', 'Owner here', 'owner-message'))
+        .pipe(toArray()),
+    );
+    const owner = requestBody(network.mock.calls[2]);
+    expect(JSON.stringify(owner.messages)).not.toContain(
+      'opened by the Dot Lead Dot',
+    );
   });
 
   it('stops the delegated run on the server when the delegating run stops', async () => {
@@ -399,7 +458,13 @@ describe('DotAgent delegation', () => {
     const done = lastValueFrom(
       f
         .agent(f.researcher.id)
-        .run(runInput('child', 'Task delegated by the Dot Lead Dot'))
+        .run(
+          runInput(
+            'child',
+            'Task delegated by the Dot Lead Dot',
+            'opendots:delegation:1',
+          ),
+        )
         .pipe(toArray()),
     ).catch((error: unknown) => error);
     await vi.waitFor(() => expect(modelSignal).toBeDefined());
@@ -480,6 +545,53 @@ describe('delegation through the platform', () => {
         .some((message) => message.id.startsWith('opendots:delegation:')),
     ).toBe(true);
     expect(modelBodies[2]).toContain('Researcher found 42.');
+  });
+});
+
+describe('server turn cancellation', () => {
+  it('stops the agent run on the server when a server turn is cancelled', async () => {
+    const store = new Store(':memory:');
+    const workspace = new WorkspaceStore(':memory:', 'owner');
+    const runner = new SqliteAgentRunner(':memory:');
+    cleanup.push(() => {
+      store.close();
+      workspace.close();
+      runner.close();
+    });
+    const platform = new Platform(store, workspace, config, undefined, runner);
+    const app = createApp({
+      store,
+      runner: new Runner(store, { mode: 'live', baseUrl: config.baseUrl }),
+      config: { mode: 'live', baseUrl: config.baseUrl },
+      platform,
+      auth: false,
+    });
+    const thread = await platform.createConversation(
+      workspace.dots()[0].id,
+      'Task',
+    );
+    let modelSignal: AbortSignal | undefined;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (request, init) => {
+      const url = String(request instanceof Request ? request.url : request);
+      if (url.startsWith('http://opendots.test/'))
+        return app.request(url.slice('http://opendots.test'.length), init);
+      modelSignal = init?.signal ?? undefined;
+      return new Promise((_resolve, reject) =>
+        init?.signal?.addEventListener('abort', () =>
+          reject(new DOMException('Aborted', 'AbortError')),
+        ),
+      );
+    });
+    const controller = new AbortController();
+    // The mocked self-call ignores the client abort, so the turn itself is
+    // not awaited; only the server-side run matters here.
+    void platform
+      .turn(thread.id, 'Long task.', controller.signal)
+      .catch(() => undefined);
+    await vi.waitFor(() => expect(modelSignal).toBeDefined());
+    controller.abort(new Error('Run stopped.'));
+    // Aborting the self-call alone leaves the runtime's agent run going.
+    await vi.waitFor(() => expect(modelSignal?.aborted).toBe(true));
   });
 });
 

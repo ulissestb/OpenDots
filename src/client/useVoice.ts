@@ -114,16 +114,22 @@ export function useVoice(
   );
   useEffect(() => {
     if (status !== 'active' && status !== 'connecting') return;
+    // One failed poll (a network blip, a proxy 502) must not hang up a
+    // healthy call; give up after several in a row.
+    let failures = 0;
     const timer = setInterval(() => {
       const current = session.current;
       const id = current?.id;
       if (id)
         void api<{ endedAt: number | null }>(`/voice/calls/${id}`)
           .then((call) => {
+            failures = 0;
             if (session.current === current && call.endedAt) void end();
           })
           .catch(() => {
             if (session.current !== current) return;
+            failures += 1;
+            if (failures < 3) return;
             setError('Call control connection was lost.');
             void end();
           });
@@ -179,6 +185,7 @@ export function useVoice(
             );
         });
       };
+      let dropTimer: ReturnType<typeof setTimeout> | undefined;
       pc.onconnectionstatechange = () => {
         if (current.cancelled) return;
         if (pc.connectionState === 'connected') {
@@ -191,10 +198,18 @@ export function useVoice(
               },
             );
         }
-        if (['failed', 'disconnected'].includes(pc.connectionState)) {
+        // "disconnected" often recovers on its own; only "failed" is final.
+        clearTimeout(dropTimer);
+        if (pc.connectionState === 'failed') {
           setError('The voice connection dropped.');
           void end();
-        }
+        } else if (pc.connectionState === 'disconnected')
+          dropTimer = setTimeout(() => {
+            if (current.cancelled || pc.connectionState !== 'disconnected')
+              return;
+            setError('The voice connection dropped.');
+            void end();
+          }, 5000);
       };
       channel.onmessage = async (event) => {
         if (current.cancelled) return;

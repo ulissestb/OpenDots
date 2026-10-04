@@ -177,7 +177,7 @@ export class McpStore {
     // credentials clear that review, keep the old approval as an explicit list
     // so the next test cannot approve tools the owner never saw.
     const allowedTools =
-      reset && current && server.allowedTools === null
+      reset && current?.tools.length && server.allowedTools === null
         ? current.tools.map((tool) => tool.name)
         : server.allowedTools;
     const now = Date.now();
@@ -221,17 +221,24 @@ export class McpStore {
     return this.get(serverId)!;
   }
   /** Records a connection test: the reviewed tool list, or the failure. */
-  recordTest(id: string, result: { tools: McpToolInfo[] } | { error: string }) {
+  recordTest(
+    id: string,
+    result: { tools: McpToolInfo[] } | { error: string },
+    // The config the test ran against; a save since then wins.
+    updatedAt?: number,
+  ) {
+    const guard = updatedAt === undefined ? '' : ' AND updatedAt=?';
     this.db
       .prepare(
         'tools' in result
-          ? 'UPDATE mcp_servers SET tools=?, lastError=NULL, checkedAt=? WHERE id=?'
-          : 'UPDATE mcp_servers SET lastError=?, checkedAt=? WHERE id=?',
+          ? `UPDATE mcp_servers SET tools=?, lastError=NULL, checkedAt=? WHERE id=?${guard}`
+          : `UPDATE mcp_servers SET lastError=?, checkedAt=? WHERE id=?${guard}`,
       )
       .run(
         'tools' in result ? JSON.stringify(result.tools) : result.error,
         Date.now(),
         id,
+        ...(updatedAt === undefined ? [] : [updatedAt]),
       );
     return this.get(id)!;
   }

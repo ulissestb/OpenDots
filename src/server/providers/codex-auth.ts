@@ -70,15 +70,16 @@ interface Flow {
 }
 const sleep = (ms: number, signal: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
-    signal.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(timer);
-        reject(signal.reason);
-      },
-      { once: true },
-    );
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    // Drop the listener when the timer fires so long flows do not pile them up.
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
   });
 /** ChatGPT subscription sign-in through the Codex device flow. */
 export class CodexAuth {
@@ -121,6 +122,8 @@ export class CodexAuth {
       status: 'pending',
       controller: new AbortController(),
     };
+    // A concurrent start may have finished first; keep only one flow alive.
+    this.cancel();
     this.flow = flow;
     void this.poll(flow);
     return {
@@ -307,7 +310,8 @@ export class CodexAuth {
       };
     } catch (error) {
       if (error instanceof CodexReauthError)
-        this.store.markNeedsReauth(codexProvider);
+        // Only the credential this refresh used; a newer sign-in stays.
+        this.store.markNeedsReauth(codexProvider, latest.updatedAt);
       throw error;
     }
   }

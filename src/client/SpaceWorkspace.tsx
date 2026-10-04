@@ -1,5 +1,5 @@
 import { mergePageSnapshot } from './page-snapshots';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Page } from '../server/pages';
 import type { Space, WorkspaceState } from '../shared/types';
 import { api } from './api';
@@ -74,7 +74,24 @@ export function SpaceWorkspace({
       ),
     [],
   );
+  const creating = useRef(false);
+  const dirty = useRef(false);
+  const markDirty = useCallback(
+    (value: boolean) => {
+      dirty.current = value;
+      onDirty(value);
+    },
+    [onDirty],
+  );
   const create = async (parentId: string | null) => {
+    // A double click must not create two pages.
+    if (creating.current) return;
+    // Ask before creating, so a cancelled leave leaves no orphan page behind.
+    if (dirty.current) {
+      if (!window.confirm('Leave your unsaved page draft?')) return;
+      markDirty(false);
+    }
+    creating.current = true;
     try {
       const next = await api<Page>(`/spaces/${space.id}/pages`, 'POST', {
         title: 'Untitled page',
@@ -85,6 +102,8 @@ export function SpaceWorkspace({
       onPage(next.id);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not create page.');
+    } finally {
+      creating.current = false;
     }
   };
   return (
@@ -127,7 +146,7 @@ export function SpaceWorkspace({
             onHome={() => onPage()}
             onOutline={() => setOutline(!outline)}
             onSubpage={() => void create(page.id)}
-            onDirty={onDirty}
+            onDirty={markDirty}
             onSaved={saved}
             onRefresh={onRefresh}
             onSchedule={onSchedule}

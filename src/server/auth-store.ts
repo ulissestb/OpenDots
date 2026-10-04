@@ -1,11 +1,14 @@
 import { DatabaseSync } from 'node:sqlite';
 import {
   createHash,
+  createHmac,
   randomBytes,
   randomUUID,
+  scrypt,
   scryptSync,
   timingSafeEqual,
 } from 'node:crypto';
+import { promisify } from 'node:util';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { passwordProblem } from '../shared/auth.js';
@@ -45,6 +48,28 @@ export function hashPassword(password: string): string {
   const { N, r, p } = scryptParams;
   return `scrypt$${N}$${r}$${p}$${salt.toString('base64')}$${key.toString('base64')}`;
 }
+const scryptAsync = promisify(scrypt) as (
+  password: string,
+  salt: Buffer,
+  length: number,
+  options: { N: number; r: number; p: number; maxmem: number },
+) => Promise<Buffer>;
+/** verifyPassword off the event loop, for the public sign-in route. */
+export async function verifyPasswordAsync(
+  password: string,
+  stored: string,
+): Promise<boolean> {
+  const [scheme, N, r, p, salt, hash] = stored.split('$');
+  if (scheme !== 'scrypt' || !salt || !hash) return false;
+  const expected = Buffer.from(hash, 'base64');
+  const actual = await scryptAsync(password, Buffer.from(salt, 'base64'), 64, {
+    N: Number(N),
+    r: Number(r),
+    p: Number(p),
+    maxmem: scryptParams.maxmem,
+  });
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
 export function verifyPassword(password: string, stored: string): boolean {
   const [scheme, N, r, p, salt, hash] = stored.split('$');
   if (scheme !== 'scrypt' || !salt || !hash) return false;
@@ -80,7 +105,8 @@ export class AuthStore {
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, passwordHash TEXT NOT NULL, mustChangePassword INTEGER NOT NULL DEFAULT 1, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, userId TEXT NOT NULL, createdAt INTEGER NOT NULL, lastSeenAt INTEGER NOT NULL, expiresAt INTEGER NOT NULL);
-      CREATE INDEX IF NOT EXISTS sessions_user ON sessions(userId);`);
+      CREATE INDEX IF NOT EXISTS sessions_user ON sessions(userId);
+      CREATE TABLE IF NOT EXISTS auth_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
     const count = this.db
       .prepare('SELECT COUNT(*) AS count FROM users')
       .get() as { count: number };
@@ -125,6 +151,50 @@ export class AuthStore {
     const row = this.row(username);
     const valid = verifyPassword(password, row?.passwordHash ?? this.dummyHash);
     return row && valid ? toUser(row) : null;
+  }
+  /** Like verify, without blocking the event loop during the hash. */
+  async verifyAsync(username: string, password: string): Promise<User | null> {
+    const row = this.row(username);
+    const valid = await verifyPasswordAsync(
+      password,
+      row?.passwordHash ?? this.dummyHash,
+    );
+    return row && valid ? toUser(row) : null;
+  }
+  private deviceKey(): Buffer {
+    const row = this.db
+      .prepare("SELECT value FROM auth_meta WHERE key='deviceKey'")
+      .get() as { value: string } | undefined;
+    if (row) return Buffer.from(row.value, 'base64');
+    const key = randomBytes(32);
+    this.db
+      .prepare(
+        "INSERT INTO auth_meta VALUES ('deviceKey', ?) ON CONFLICT(key) DO NOTHING",
+      )
+      .run(key.toString('base64'));
+    return this.deviceKey();
+  }
+  private deviceMac(userId: string, deviceId: string) {
+    return createHmac('sha256', this.deviceKey())
+      .update(`${userId}.${deviceId}`)
+      .digest('base64url');
+  }
+  /** A token marking a browser that has signed in as this user before. */
+  deviceToken(userId: string) {
+    const deviceId = randomBytes(12).toString('base64url');
+    return `${userId}.${deviceId}.${this.deviceMac(userId, deviceId)}`;
+  }
+  /** The device id of a valid token issued to `username`, or null. */
+  device(token: string | undefined, username: string): string | null {
+    const [userId, deviceId, mac] = token?.split('.') ?? [];
+    const row = this.row(username);
+    if (!row || !userId || !deviceId || !mac || row.id !== userId) return null;
+    const expected = Buffer.from(this.deviceMac(userId, deviceId));
+    const supplied = Buffer.from(mac);
+    return expected.length === supplied.length &&
+      timingSafeEqual(expected, supplied)
+      ? deviceId
+      : null;
   }
   isDefaultPassword(): boolean {
     const row = this.row(defaultAdmin.username);
@@ -198,6 +268,24 @@ export class AuthStore {
         .run(hash, mustChange ? 1 : 0, this.now(), row.id);
       this.db.prepare('DELETE FROM sessions WHERE userId=?').run(row.id);
     });
+  }
+  /**
+   * Applies an environment-supplied reset (ADMIN_PASSWORD_RESET) once. A
+   * restart with the same value left in the environment must not undo the
+   * password the owner chose afterwards. Returns whether it was applied.
+   */
+  resetPasswordOnce(username: string, next: string): boolean {
+    const applied = this.db
+      .prepare("SELECT value FROM auth_meta WHERE key='envReset'")
+      .get() as { value: string } | undefined;
+    if (applied && verifyPassword(next, applied.value)) return false;
+    this.resetPassword(username, next);
+    this.db
+      .prepare(
+        "INSERT INTO auth_meta VALUES ('envReset', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+      )
+      .run(hashPassword(next));
+    return true;
   }
   pruneSessions() {
     const time = this.now();

@@ -3,7 +3,11 @@ import { X } from 'lucide-react';
 import type { Dot, Memory, State, WorkspaceState } from '../shared/types';
 import type { ProviderId } from '../shared/providers';
 import { CodexConnect, ModelProviderFields } from './ModelProviderFields';
-import { isCoarsePointer } from './ui-helpers';
+import {
+  backdropHandlers,
+  isCoarsePointer,
+  sessionOverlayOpen,
+} from './ui-helpers';
 export type Dialog =
   | { type: 'space' }
   | { type: 'dot'; dot?: Dot; spaceId: string }
@@ -94,7 +98,8 @@ export function WorkspaceDialog({
         ?.querySelector<HTMLElement>('input,textarea,select')
         ?.focus();
     const key = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
+      if (event.key === 'Escape' && !sessionOverlayOpen(event.target))
+        onClose();
       if (event.key === 'Tab') {
         const items = [
           ...(container.current?.querySelectorAll<HTMLElement>(
@@ -129,7 +134,7 @@ export function WorkspaceDialog({
             ? 'Something to remember.'
             : 'Let your Dot keep time.';
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" {...backdropHandlers(onClose)}>
       <section
         className="modal"
         role="dialog"

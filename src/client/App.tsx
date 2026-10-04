@@ -81,21 +81,32 @@ export function App() {
     'chat' | 'tasks' | 'memories' | 'skills' | 'space'
   >('chat');
   const dirtyPage = useRef(false);
+  const captureError = useRef('');
   const [spaceId, setSpaceId] = useState('');
   const [pageId, setPageId] = useState<string>();
   const setDirtyPage = useCallback((value: boolean) => {
     dirtyPage.current = value;
   }, []);
-  const setView = (next: typeof view) => {
+  // Ask before leaving an unsaved page draft. Call it before changing any
+  // selection, so a cancelled confirm leaves everything as it was.
+  const confirmLeave = () => {
     if (dirtyPage.current && !window.confirm('Leave your unsaved page draft?'))
-      return;
+      return false;
     dirtyPage.current = false;
+    return true;
+  };
+  const setView = (next: typeof view) => {
+    if (!confirmLeave()) return false;
     if (next !== 'space')
       history.replaceState(null, '', location.pathname + location.search);
     rawSetView(next);
+    return true;
   };
+  // The last #/spaces route the user actually landed on.
+  const acceptedHash = useRef(
+    typeof location === 'undefined' ? '' : location.hash,
+  );
   useEffect(() => {
-    let acceptedHash = location.hash;
     const navigate = () => {
       const threadMatch = location.hash.match(/^#\/threads\/([^/]+)$/);
       if (threadMatch) {
@@ -106,16 +117,16 @@ export function App() {
         /^#\/spaces\/([^/]+)(?:\/pages\/([^/]+))?$/,
       );
       if (!match) return;
-      if (dirtyPage.current && location.hash === acceptedHash) return;
-      if (
-        dirtyPage.current &&
-        !window.confirm('Leave your unsaved page draft?')
-      ) {
-        history.replaceState(null, '', acceptedHash || location.pathname);
+      if (dirtyPage.current && location.hash === acceptedHash.current) return;
+      if (!confirmLeave()) {
+        history.replaceState(
+          null,
+          '',
+          acceptedHash.current || location.pathname,
+        );
         return;
       }
-      acceptedHash = location.hash;
-      dirtyPage.current = false;
+      acceptedHash.current = location.hash;
       setSpaceId(match[1]);
       setPageId(match[2]);
       rawSetView('space');
@@ -141,7 +152,11 @@ export function App() {
   const [pane, setPane] = useState(false);
   const [capture, setCapture] = useState<Result>();
   const [prompt, setPrompt] = useState('');
-  const [pendingPrompt, setPendingPrompt] = useState<string>();
+  // The first message of a new conversation, sent only into that thread.
+  const [pendingPrompt, setPendingPrompt] = useState<{
+    threadId: string;
+    text: string;
+  }>();
   const [busy, setBusy] = useState(false);
   const [search, setSearch] = useState('');
   const [taskDetail, setTaskDetail] = useState<Detail>();
@@ -245,10 +260,21 @@ export function App() {
       if (document.hidden) return;
       void api<Result | null>(`/conversations/${selectedThread}/capture`)
         .then((result) => {
-          if (active) setCapture(result ?? undefined);
+          if (!active) return;
+          setCapture(result ?? undefined);
+          // Clear an error this poll raised once the capture loads again.
+          const stale = captureError.current;
+          captureError.current = '';
+          if (stale) setError((current) => (current === stale ? '' : current));
         })
         .catch((e) => {
-          if (active) setError(e.message);
+          if (!active) return;
+          const message =
+            e instanceof Error ? e.message : 'Could not load the capture.';
+          // Re-raise only when the message changes, so Dismiss sticks.
+          if (captureError.current === message) return;
+          captureError.current = message;
+          setError(message);
         });
     };
     load();
@@ -260,8 +286,10 @@ export function App() {
       document.removeEventListener('visibilitychange', load);
     };
   }, [selectedThread, showCapture]);
+  const [mutating, setMutating] = useState(false);
   const mutate = async (path: string, method: string, body?: unknown) => {
     setError('');
+    setMutating(true);
     try {
       await api(path, method, body);
       await refresh();
@@ -271,6 +299,8 @@ export function App() {
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not save.');
       return false;
+    } finally {
+      setMutating(false);
     }
   };
   const dot =
@@ -280,6 +310,11 @@ export function App() {
     (item) => item.id === selectedThread && item.dotId === dot?.id,
   );
   const configured = !!workspace && workspace.setup.missing.length === 0;
+  // Once mounted, keep the provider: unwrapping the tree when setup readiness
+  // flips (e.g. a ChatGPT sign-in needing reauth) would remount everything and
+  // discard unsaved page drafts and open dialogs.
+  const [providerMounted, setProviderMounted] = useState(false);
+  if (configured && !providerMounted) setProviderMounted(true);
   useEffect(() => {
     if (!routeThread || !workspace) return;
     const conversation = workspace.conversations.find(
@@ -288,26 +323,35 @@ export function App() {
     // A just-delegated conversation appears with the next workspace refresh.
     if (!conversation) return;
     setRouteThread(undefined);
-    history.replaceState(null, '', location.pathname + location.search);
-    if (dirtyPage.current && !window.confirm('Leave your unsaved page draft?'))
+    if (!confirmLeave()) {
+      // Stay on the page and put its route back in place of #/threads/:id.
+      history.replaceState(
+        null,
+        '',
+        acceptedHash.current.startsWith('#/spaces/')
+          ? acceptedHash.current
+          : location.pathname + location.search,
+      );
       return;
-    dirtyPage.current = false;
+    }
     setSelectedDot(conversation.dotId);
     setSelectedThread(conversation.id);
     setView('chat');
     setMobile(false);
   }, [routeThread, workspace]);
   const chooseDot = (next: Dot) => {
+    if (!setView('chat')) return;
     setSelectedDot(next.id);
     setSelectedThread(
       workspace?.conversations.find((item) => item.dotId === next.id)?.id,
     );
-    setView('chat');
     setMobile(false);
     setPendingPrompt(undefined);
   };
   const newConversation = async (text?: string) => {
     if (!dot || !configured || busy) return;
+    // Ask before creating, so a cancel does not leave a stray conversation.
+    if (!confirmLeave()) return;
     setBusy(true);
     setError('');
     try {
@@ -317,7 +361,7 @@ export function App() {
       });
       await refresh();
       setSelectedThread(next.id);
-      setPendingPrompt(text);
+      setPendingPrompt(text ? { threadId: next.id, text } : undefined);
       setPrompt('');
       setView('chat');
       setMobile(false);
@@ -371,8 +415,7 @@ export function App() {
           className="rail-brand"
           aria-label="OpenDots home"
           onClick={() => {
-            setView('chat');
-            setSelectedThread(undefined);
+            if (setView('chat')) setSelectedThread(undefined);
           }}
         >
           o<span>·</span>
@@ -411,7 +454,16 @@ export function App() {
         {user && (
           <button
             aria-label="Change password"
-            onClick={() => setChangingPassword(true)}
+            onClick={() => {
+              // The password screen replaces the workspace, like signing out.
+              if (
+                dirtyPage.current &&
+                !window.confirm('Leave your unsaved page draft?')
+              )
+                return;
+              dirtyPage.current = false;
+              setChangingPassword(true);
+            }}
           >
             <KeyRound size={18} />
           </button>
@@ -443,8 +495,7 @@ export function App() {
         <button
           className="wordmark"
           onClick={() => {
-            setView('chat');
-            setSelectedThread(undefined);
+            if (setView('chat')) setSelectedThread(undefined);
           }}
         >
           <span className="dotted-logo">
@@ -531,9 +582,9 @@ export function App() {
               const conversation = workspace.conversations.find(
                 (item) => item.id === id,
               );
+              if (!setView('chat')) return;
               if (conversation) setSelectedDot(conversation.dotId);
               setSelectedThread(id);
-              setView('chat');
               setMobile(false);
             }}
             onNew={() => void newConversation()}
@@ -700,8 +751,7 @@ export function App() {
               }
               onThread={(id) => {
                 const target = workspace.conversations.find((t) => t.id === id);
-                if (target) {
-                  setView('chat');
+                if (target && setView('chat')) {
                   setSelectedDot(target.dotId);
                   setSelectedThread(id);
                 }
@@ -717,7 +767,11 @@ export function App() {
                   thread={thread}
                   dot={dot}
                   dots={workspace.dots}
-                  initialPrompt={pendingPrompt}
+                  initialPrompt={
+                    pendingPrompt?.threadId === thread.id
+                      ? pendingPrompt.text
+                      : undefined
+                  }
                   onConsumed={() => setPendingPrompt(undefined)}
                   voiceReady={workspace.setup.voice}
                   calls={workspace.calls.filter(
@@ -980,7 +1034,7 @@ export function App() {
                     <h2>{taskDetail.task.prompt}</h2>
                     <TaskActions
                       task={taskDetail.task}
-                      busy={busy}
+                      busy={busy || mutating}
                       settings={state.settings}
                       onAction={(action) =>
                         void mutate(
@@ -1077,7 +1131,7 @@ export function App() {
   ) : (
     content
   );
-  return configured ? (
+  return providerMounted ? (
     <CopilotKitProvider runtimeUrl="/api/copilotkit" credentials="same-origin">
       {shell}
     </CopilotKitProvider>

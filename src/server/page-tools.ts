@@ -7,13 +7,23 @@ export function pageAccess(
   spaceId: string,
   threadId: string,
   check: () => void,
+  /** Further limits Spaces (a delegated run: the delegating Dots' access). */
+  shared: (spaceId: string) => boolean = () => true,
 ) {
   const dotId = workspace.requireThread(threadId).dotId;
+  const canAccess = (target: string) =>
+    workspace.canAccessSpace(dotId, target) && shared(target);
+  // The Space of this conversation's page, while the Dot may still use it.
+  const pageSpace = () => {
+    const target = workspace.pages.forThread(threadId)?.spaceId;
+    return target && canAccess(target) ? target : undefined;
+  };
   const resolve = (requested?: string) => {
     check();
-    const target =
-      requested ?? workspace.pages.forThread(threadId)?.spaceId ?? spaceId;
-    if (!workspace.canAccessSpace(dotId, target))
+    // A revoked page Space falls back to the default destination, so the
+    // conversation keeps working without the page.
+    const target = requested ?? pageSpace() ?? spaceId;
+    if (!canAccess(target))
       throw new Error('Space access has been revoked or was not granted.');
     return target;
   };
@@ -22,12 +32,14 @@ export function pageAccess(
     url: `/#/spaces/${page.spaceId}/pages/${page.id}`,
   });
   return {
-    context: () => workspace.pages.forThread(threadId, resolve()),
+    context: () => {
+      check();
+      const target = pageSpace();
+      return target ? workspace.pages.forThread(threadId, target) : undefined;
+    },
     spaces: () => {
       check();
-      return workspace
-        .spaces()
-        .filter((space) => workspace.canAccessSpace(dotId, space.id));
+      return workspace.spaces().filter((space) => canAccess(space.id));
     },
     list: (requested?: string) =>
       workspace.pages

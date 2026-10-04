@@ -22,6 +22,13 @@ import { MemoryExtractor } from './memory-extractor.js';
 import { DotDelegation } from './delegation.js';
 import type { McpService } from './mcp.js';
 import type { ConversationUsage } from '../shared/providers.js';
+import {
+  internalMessagePrefix,
+  voiceReceiptMessagePrefix,
+} from '../shared/voice-receipt.js';
+
+const messageId = (message: object) =>
+  'id' in message && typeof message.id === 'string' ? message.id : '';
 export class Platform {
   private channelStartupFailed = false;
   readonly pages: PageService;
@@ -72,6 +79,7 @@ export class Platform {
               extractor,
               delegation,
               mcp,
+              (threadId) => this.turnSignals.get(threadId),
             ),
           ]),
       );
@@ -115,6 +123,7 @@ export class Platform {
             extractor,
             delegation,
             mcp,
+            (threadId) => this.turnSignals.get(threadId),
           ),
       });
       channels.push(slack);
@@ -228,11 +237,17 @@ export class Platform {
       userId: this.workspace.ownerId,
     });
     return history.messages
-      .filter((message) => ['user', 'assistant'].includes(message.role))
+      .filter(
+        (message) =>
+          ['user', 'assistant'].includes(message.role) &&
+          // Earlier call receipts are bookkeeping, not conversation.
+          !messageId(message).startsWith(voiceReceiptMessagePrefix),
+      )
       .slice(-12)
       .map(
         (message) =>
-          `${message.role}: ${typeof message.content === 'string' ? message.content : ''}`,
+          // Server prompts (scheduled, delegated) are not the owner speaking.
+          `${message.role === 'user' && messageId(message).startsWith(internalMessagePrefix) ? 'request' : message.role}: ${typeof message.content === 'string' ? message.content : ''}`,
       )
       .join('\n')
       .slice(-12000);
@@ -261,6 +276,12 @@ export class Platform {
   }
   private turns = new Map<string, Promise<unknown>>();
   /**
+   * The caller's signal for the server turn running on each thread. Aborting
+   * a turn's HTTP request does not stop the agent run on the runtime side, so
+   * the DotAgent watches this signal (a cancelled or timed-out task).
+   */
+  private turnSignals = new Map<string, AbortSignal>();
+  /**
    * Runs one server-side turn. Turns on the same conversation wait for each
    * other: a new run on a thread supersedes a streaming one, which would drop
    * the earlier turn (two voice tasks in one call, a task during a delegation).
@@ -270,11 +291,29 @@ export class Platform {
     prompt: string,
     signal: AbortSignal,
     metadata?: Record<string, unknown>,
+    options: {
+      /** Called when the turn stops waiting and starts. */
+      onStart?: () => void;
+      /** A run budget counted from the start, not from queueing. */
+      timeoutMs?: number;
+    } = {},
   ): Promise<string> {
     const previous = this.turns.get(threadId) ?? Promise.resolve();
-    const run = previous.then(() => {
+    const run = previous.then(async () => {
+      // A browser run on this thread is not in the queue above; let it finish.
+      await this.local?.idle(threadId);
       signal.throwIfAborted();
-      return this.runTurn(threadId, prompt, signal, metadata);
+      const budgeted = options.timeoutMs
+        ? AbortSignal.any([signal, AbortSignal.timeout(options.timeoutMs)])
+        : signal;
+      options.onStart?.();
+      this.turnSignals.set(threadId, budgeted);
+      try {
+        return await this.runTurn(threadId, prompt, budgeted, metadata);
+      } finally {
+        if (this.turnSignals.get(threadId) === budgeted)
+          this.turnSignals.delete(threadId);
+      }
     });
     const settled = run.catch(() => undefined);
     this.turns.set(threadId, settled);

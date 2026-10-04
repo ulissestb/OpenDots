@@ -14,6 +14,7 @@ export class Runner {
       memories: Memory[],
       signal: AbortSignal,
       progress: (text: string) => void,
+      started: () => void,
     ) => Promise<Result>,
   ) {}
   start() {
@@ -67,15 +68,20 @@ export class Runner {
         console.error('Scheduler ownership check failed:', describe(error));
       }
     }, 100);
-    const timeout = setTimeout(
-      () =>
-        controller.abort(
-          new Error(
-            `Task exceeded the ${Math.round(timeoutMs / 1000)} second time limit.`,
-          ),
+    const expire = () =>
+      controller.abort(
+        new Error(
+          `Task exceeded the ${Math.round(timeoutMs / 1000)} second time limit.`,
         ),
-      timeoutMs,
-    );
+      );
+    let timeout = setTimeout(expire, timeoutMs);
+    // A turn may wait behind another on its conversation; the budget (and the
+    // lease) start again when the agent actually starts.
+    const started = () => {
+      clearTimeout(timeout);
+      timeout = setTimeout(expire, timeoutMs);
+      this.store.renew(claim, Date.now() + timeoutMs + 120_000);
+    };
     try {
       const settings = this.store.settings();
       // Tasks have no Dot here, so only global memories apply.
@@ -89,7 +95,13 @@ export class Runner {
         this.store.event(claim.id, claim.lease, text);
       };
       const result = this.execute
-        ? await this.execute(claim, memories, controller.signal, progress)
+        ? await this.execute(
+            claim,
+            memories,
+            controller.signal,
+            progress,
+            started,
+          )
         : await research(
             claim.prompt,
             memories,

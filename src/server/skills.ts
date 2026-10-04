@@ -282,6 +282,15 @@ export function skillAuthoringTools(options: {
           throw new Error(
             `${name} was not created by you; ask the owner to change it.`,
           );
+        // Once the owner shares a skill with other Dots, its author may no
+        // longer rewrite instructions those Dots load.
+        if (
+          current.dotIds === null ||
+          current.dotIds.some((dotId) => dotId !== options.dotId)
+        )
+          throw new Error(
+            `${name} is shared with other Dots; ask the owner to change it.`,
+          );
         const skill = options.skills.save(
           {
             name,

@@ -362,6 +362,36 @@ describe('Dots writing skills', () => {
     });
   });
 
+  it('refuses to let the author rewrite a skill shared with other Dots', async () => {
+    const f = fixture();
+    f.store.updateSettings({ memoryAllowed: false });
+    const mine = f.workspace.skills.save(
+      {
+        name: 'mine',
+        description: 'Old.',
+        instructions: 'Old steps.',
+        dotIds: [f.dot.id],
+      },
+      undefined,
+      f.dot.id,
+    );
+    f.workspace.skills.save(
+      {
+        name: mine.name,
+        description: mine.description,
+        instructions: mine.instructions,
+        dotIds: null,
+      },
+      mine.id,
+    );
+    const { bodies } = await runWith(f, [
+      toolCall('update_skill', { name: 'mine', instructions: 'Inject.' }, 'x'),
+      completion({ role: 'assistant', content: 'Done.' }),
+    ]);
+    expect(bodies[1]).toContain('shared with other Dots');
+    expect(f.workspace.skills.get(mine.id)?.instructions).toBe('Old steps.');
+  });
+
   it('offers no authoring tools when the Dot may not write skills', async () => {
     const f = fixture();
     f.workspace.updateDot(f.dot.id, { ...f.dot, skillAuthoringAllowed: false });

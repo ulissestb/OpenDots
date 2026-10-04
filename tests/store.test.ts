@@ -77,6 +77,16 @@ describe('durable task lifecycle', () => {
     store.updateSettings({ paused: false });
     expect(store.claim(Date.now())?.id).toBe(task.id);
   });
+  it('requeues a running task instead of failing it when the model changes', () => {
+    const { store } = fixture();
+    const task = store.createTask('Research one');
+    const claim = store.claim(Date.now())!;
+    store.updateSettings({ model: 'other-model' });
+    expect(store.owns(claim)).toBe(false);
+    store.fail(claim, 'Run stopped because settings changed.');
+    expect(store.task(task.id)?.status).toBe('queued');
+    expect(store.claim(Date.now())?.id).toBe(task.id);
+  });
   it('recovers expired work after restart without duplicate completion', () => {
     const { store } = fixture();
     store.createTask('Recover me');

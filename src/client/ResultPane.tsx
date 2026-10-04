@@ -142,9 +142,9 @@ export function ResultPane({
             <h3>
               Source notes <span>{latest.sources.length}</span>
             </h3>
-            {latest.sources.map((source) =>
+            {latest.sources.map((source, index) =>
               latest.sample ? (
-                <div className="source-card" key={source.url}>
+                <div className="source-card" key={`${index}:${source.url}`}>
                   <span className="source-icon">
                     <BookOpen size={15} />
                   </span>
@@ -158,7 +158,7 @@ export function ResultPane({
                 <a
                   className="source-card"
                   href={source.url}
-                  key={source.url}
+                  key={`${index}:${source.url}`}
                   target="_blank"
                   rel="noreferrer"
                 >

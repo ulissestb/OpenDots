@@ -3,7 +3,7 @@ import { Hono, type Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { bearerMatches, type AuthService } from './auth.js';
 import { z } from 'zod';
-import { Store } from './store.js';
+import { Store, settingsInterruptRuns } from './store.js';
 import { Runner } from './runner.js';
 import { configured, type Config } from './research.js';
 import type { Platform } from './platform.js';
@@ -247,14 +247,7 @@ export function createApp({
     if (!parsed.success) return c.json({ error: 'Invalid settings.' }, 400);
     const previous = store.settings();
     const settings = store.updateSettings(parsed.data);
-    if (
-      (previous.modelProvider ?? null) !== (settings.modelProvider ?? null) ||
-      (previous.model ?? null) !== (settings.model ?? null) ||
-      settings.paused ||
-      !settings.researchAllowed ||
-      previous.memoryAllowed !== settings.memoryAllowed
-    )
-      runner.abortAll();
+    if (settingsInterruptRuns(previous, settings)) runner.abortAll();
     if (settings.paused) voice?.abortAll();
     else void voice?.resumePending();
     return c.json(settings);

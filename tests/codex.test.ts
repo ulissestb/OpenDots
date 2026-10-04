@@ -9,7 +9,10 @@ import { Store } from '../src/server/store.js';
 import { WorkspaceStore } from '../src/server/workspace.js';
 import { CodexAuth } from '../src/server/providers/codex-auth.js';
 import { ProviderCredentialStore } from '../src/server/providers/credential-store.js';
-import { normalizeCodexBody } from '../src/server/providers/openai-codex.js';
+import {
+  completedOutput,
+  normalizeCodexBody,
+} from '../src/server/providers/openai-codex.js';
 import { ProviderRegistry } from '../src/server/providers/registry.js';
 import { chatgptJwt, responsesText } from './fixtures/responses-stream.js';
 
@@ -355,5 +358,41 @@ describe('ChatGPT token refresh timeout', () => {
       token: 'new-access',
     });
     expect(network).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('Codex audit regressions', () => {
+  it('keeps a sign-in that lands while a dead refresh is in flight', async () => {
+    const store = credentials();
+    connected(store, Date.now() - 1);
+    const auth = new CodexAuth(store);
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      store.save('openai-codex', {
+        tokens: { access_token: 'fresh', refresh_token: 'fresh-refresh' },
+        accountId: 'account-1',
+        email: null,
+        plan: null,
+        expiresAt: Date.now() + 3_600_000,
+      });
+      return json({ error: 'invalid_grant' }, 400);
+    });
+    await expect(auth.accessToken()).rejects.toThrow();
+    expect(store.get('openai-codex')?.state).toBe('connected');
+  });
+
+  it('splits SSE events whose CRLF straddles two chunks', async () => {
+    const encoder = new TextEncoder();
+    const chunks = ['data: {"type":"a"}\r\n\r', '\ndata: {"type":"b"}\r\n\r\n'];
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+        controller.close();
+      },
+    });
+    const text = await new Response(
+      source.pipeThrough(completedOutput()),
+    ).text();
+    expect(text).toBe('data: {"type":"a"}\n\ndata: {"type":"b"}\n\n');
   });
 });

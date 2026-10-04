@@ -170,12 +170,17 @@ export class ProviderCredentialStore {
       );
     return true;
   }
-  markNeedsReauth(provider: string) {
+  markNeedsReauth(provider: string, expectedUpdatedAt?: number) {
+    const guard = expectedUpdatedAt === undefined ? '' : ' AND updatedAt=?';
     this.db
       .prepare(
-        "UPDATE provider_credentials SET state='needs_reauth', updatedAt=? WHERE provider=?",
+        `UPDATE provider_credentials SET state='needs_reauth', updatedAt=? WHERE provider=?${guard}`,
       )
-      .run(this.now(), provider);
+      .run(
+        this.now(),
+        provider,
+        ...(expectedUpdatedAt === undefined ? [] : [expectedUpdatedAt]),
+      );
   }
   delete(provider: string) {
     this.db

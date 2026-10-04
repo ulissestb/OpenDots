@@ -184,6 +184,32 @@ describe('sign-in', () => {
       mustChangePassword: true,
     });
   });
+  it('rate-limits wrong current passwords on password change', async () => {
+    const { app } = fixture();
+    const { cookie } = await signInChanged(app);
+    const attempt = (currentPassword: string) =>
+      app.request(
+        '/api/auth/password',
+        post({ currentPassword, newPassword: 'yet-another-secret-1' }, cookie),
+      );
+    for (let i = 0; i < 5; i++)
+      expect((await attempt('wrong-guess')).status).toBe(401);
+    expect((await attempt('a-much-better-secret')).status).toBe(429);
+  });
+  it('applies an environment reset once per value', () => {
+    const { authStore } = fixture();
+    expect(authStore.resetPasswordOnce('admin', 'reset-secret-123')).toBe(true);
+    authStore.resetPassword('admin', 'owner-chosen-456', false);
+    // A restart with the same value still set must keep the owner's password.
+    expect(authStore.resetPasswordOnce('admin', 'reset-secret-123')).toBe(
+      false,
+    );
+    expect(authStore.verify('admin', 'owner-chosen-456')).toBeTruthy();
+    expect(authStore.resetPasswordOnce('admin', 'another-reset-789')).toBe(
+      true,
+    );
+    expect(authStore.verify('admin', 'another-reset-789')).toBeTruthy();
+  });
   it('lets Bearer tokens bypass sign-in, from any host', async () => {
     const { app } = fixture({ bearer: ['service-token'] });
     const headers = { Authorization: 'Bearer service-token' };
@@ -239,7 +265,11 @@ describe('deployment hardening', () => {
       auth,
     });
     // Every request reaches the app from the proxy's socket address.
-    const attempt = (password: string, forwardedFor?: string) =>
+    const attempt = (
+      password: string,
+      forwardedFor?: string,
+      cookie?: string,
+    ) =>
       app.request(
         '/api/auth/login',
         {
@@ -247,6 +277,7 @@ describe('deployment hardening', () => {
           headers: {
             'Content-Type': 'application/json',
             ...(forwardedFor ? { 'X-Forwarded-For': forwardedFor } : {}),
+            ...(cookie ? { Cookie: cookie } : {}),
           },
           body: JSON.stringify({ username: 'admin', password }),
         },
@@ -308,14 +339,37 @@ describe('deployment hardening', () => {
       expect((await attempt('bad', `198.51.100.${i}`)).status).toBe(401);
     expect((await attempt('admin', '198.51.100.99')).status).toBe(429);
   });
-  it('does not let a distributed guesser lock the owner out', async () => {
+  const deviceOf = (response: Response) =>
+    response.headers
+      .getSetCookie()
+      .find((item) => item.startsWith('opendots_device='))
+      ?.split(';')[0];
+  it('limits a concurrent burst of guesses from one address', async () => {
     const attempt = proxied(true);
+    const statuses = await Promise.all(
+      Array.from({ length: 10 }, () => attempt('bad', '203.0.113.9')),
+    );
+    expect(statuses.filter((r) => r.status === 429).length).toBe(5);
+  }, 30_000);
+  it('caps a distributed guesser without locking out a known device', async () => {
+    const attempt = proxied(true);
+    const device = deviceOf(await attempt('admin', '198.51.100.1'));
+    expect(device).toBeTruthy();
     for (let i = 0; i < 50; i++)
       expect((await attempt('bad', `203.0.113.${i}`)).status).toBe(401);
-    // Addresses that already failed are blocked for this username...
-    expect((await attempt('bad', '203.0.113.1')).status).toBe(429);
-    // ...but a fresh address still gets its own attempts.
-    expect((await attempt('admin', '198.51.100.1')).status).toBe(200);
+    // Rotating addresses no longer buys more guesses...
+    expect((await attempt('admin', '192.0.2.77')).status).toBe(429);
+    // ...while the owner's browser, which signed in before, still can.
+    expect((await attempt('admin', '192.0.2.78', device)).status).toBe(200);
+  }, 30_000);
+  it('keeps a known device signing in when a proxy hides client addresses', async () => {
+    const attempt = proxied(false);
+    const device = deviceOf(await attempt('admin'));
+    for (let i = 0; i < 5; i++) expect((await attempt('bad')).status).toBe(401);
+    expect((await attempt('admin')).status).toBe(429);
+    expect((await attempt('admin', undefined, device)).status).toBe(200);
+    // A forged device cookie counts as no device.
+    expect((await attempt('admin', undefined, `${device}x`)).status).toBe(429);
   }, 30_000);
   it('treats COOKIE_SECURE=auto with an https APP_ORIGIN as secure', () => {
     expect(cookieSecure(undefined, 'https://dots.example.com')).toBe(true);
