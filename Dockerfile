@@ -13,6 +13,8 @@ RUN npm ci --omit=dev && mkdir -p /data && chown node:node /data
 COPY --from=build /app/dist ./dist
 USER node
 EXPOSE 4310
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD ["node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||4310)+'/api/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
 CMD ["node", "dist/server/server/index.js"]
 
 FROM node:24-bookworm-slim AS browser

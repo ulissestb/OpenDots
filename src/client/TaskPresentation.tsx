@@ -16,10 +16,32 @@ export const relative = (value: number) => {
         ? `${Math.floor(minutes / 60)}h ago`
         : new Date(value).toLocaleDateString();
 };
+/** Short label for a future time, e.g. "in 5m" or a date and time. */
+export const upcoming = (value: number, now = Date.now()) => {
+  const minutes = Math.ceil((value - now) / 60000);
+  return minutes <= 1
+    ? 'soon'
+    : minutes < 60
+      ? `in ${minutes}m`
+      : minutes < 1440
+        ? `in ${Math.round(minutes / 60)}h`
+        : new Date(value).toLocaleString();
+};
 export const statusLabel = (task: Task) =>
   task.status === 'completed' && task.nextRunAt
     ? 'Scheduled'
-    : task.status.charAt(0).toUpperCase() + task.status.slice(1);
+    : task.status === 'failed' && task.nextRunAt
+      ? 'Retrying'
+      : task.status.charAt(0).toUpperCase() + task.status.slice(1);
+/** When a recurring task runs next; failed tasks retry with backoff. */
+export const nextRunLabel = (task: Task, now = Date.now()) =>
+  !task.nextRunAt
+    ? ''
+    : task.status === 'completed'
+      ? `Next run ${upcoming(task.nextRunAt, now)}`
+      : task.status === 'failed'
+        ? `Retrying ${upcoming(task.nextRunAt, now)}`
+        : '';
 export function Status({ task }: { task: Task }) {
   return (
     <span className={`status ${task.status}`}>
@@ -54,6 +76,7 @@ export function TaskRow({
             ? `Repeats every ${task.intervalSeconds < 3600 ? task.intervalSeconds / 60 + ' min' : task.intervalSeconds / 3600 + ' hr'} · `
             : ''}
           {relative(task.updatedAt)}
+          {nextRunLabel(task) ? ` · ${nextRunLabel(task)}` : ''}
         </span>
       </div>
       <Status task={task} />

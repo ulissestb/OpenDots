@@ -63,7 +63,7 @@ it('checks abort again before sending source evidence or memories to the model',
 });
 it('omits stored memories from research when memory permission is disabled', async () => {
   const store = new Store(':memory:');
-  store.saveMemory('Sensitive preference');
+  store.saveMemory({ text: 'Sensitive preference' });
   store.updateSettings({ memoryAllowed: false });
   const task = store.createTask('Read this sample');
   const runner = new Runner(store, { mode: 'sample', baseUrl: '' });
@@ -95,4 +95,58 @@ it('requeues active work on graceful shutdown instead of losing it', async () =>
   expect(store.tasks()[0].status).toBe('queued');
   expect(store.claim()).toBeTruthy();
   store.close();
+});
+it('survives database errors in the scheduler tick', async () => {
+  const store = new Store(':memory:');
+  const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const claim = vi.spyOn(store, 'claim').mockImplementation(() => {
+    throw new Error('database is locked');
+  });
+  const runner = new Runner(store, { mode: 'sample', baseUrl: '' });
+  runner.start();
+  await vi.waitFor(() =>
+    expect(errors).toHaveBeenCalledWith(
+      'Scheduler tick failed:',
+      expect.any(String),
+    ),
+  );
+  claim.mockRestore();
+  // A failure while recording the failure does not reject the tick either.
+  store.createTask('Read this sample');
+  vi.spyOn(store, 'fail').mockImplementation(() => {
+    throw new Error('disk I/O error');
+  });
+  const failing = new Runner(store, { mode: 'sample', baseUrl: '' }, () =>
+    Promise.reject(new Error('Model failed')),
+  );
+  await expect(failing.tick()).resolves.toBeUndefined();
+  runner.stop();
+  errors.mockRestore();
+  store.close();
+});
+
+it('restarts the time budget and lease when a queued turn starts', async () => {
+  vi.useFakeTimers();
+  try {
+    const store = new Store(':memory:');
+    const runner = new Runner(
+      store,
+      { ...config, runTimeoutMs: 1000 },
+      async (_claim, _memories, signal, _progress, started) => {
+        // Waiting 12 s behind another turn, then 12 s of work: 24 s in all,
+        // over the 16 s budget, but within it from the start.
+        await vi.advanceTimersByTimeAsync(12_000);
+        started();
+        await vi.advanceTimersByTimeAsync(12_000);
+        signal.throwIfAborted();
+        return { text: 'Done', sources: [], sample: false };
+      },
+    );
+    store.createTask('Queued task');
+    await runner.tick();
+    expect(store.tasks()[0].status).toBe('completed');
+    store.close();
+  } finally {
+    vi.useRealTimers();
+  }
 });

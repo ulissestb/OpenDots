@@ -8,9 +8,11 @@ import {
   X,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import type { Dot, Result, Status } from '../shared/types';
 import { Mascot } from './Mascot';
 import { ComputerPanel } from './ComputerPanel';
+import { sourceHost } from './ui-helpers';
 export function ResultPane({
   latest,
   status,
@@ -121,6 +123,7 @@ export function ResultPane({
           )}
           <article className="brief">
             <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
               components={{
                 img: ({ alt }) => (
                   <span>{alt ? `[Image: ${alt}]` : '[Image omitted]'}</span>
@@ -139,9 +142,9 @@ export function ResultPane({
             <h3>
               Source notes <span>{latest.sources.length}</span>
             </h3>
-            {latest.sources.map((source) =>
+            {latest.sources.map((source, index) =>
               latest.sample ? (
-                <div className="source-card" key={source.url}>
+                <div className="source-card" key={`${index}:${source.url}`}>
                   <span className="source-icon">
                     <BookOpen size={15} />
                   </span>
@@ -155,7 +158,7 @@ export function ResultPane({
                 <a
                   className="source-card"
                   href={source.url}
-                  key={source.url}
+                  key={`${index}:${source.url}`}
                   target="_blank"
                   rel="noreferrer"
                 >
@@ -165,7 +168,7 @@ export function ResultPane({
                   <div>
                     <strong>{source.title}</strong>
                     <p>{source.excerpt}</p>
-                    <small>{new URL(source.url).hostname}</small>
+                    <small>{sourceHost(source.url)}</small>
                   </div>
                   <ArrowUpRight size={15} />
                 </a>

@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { createShutdown } from '../src/server/shutdown.js';
+import { closeHttpServer, createShutdown } from '../src/server/shutdown.js';
 afterEach(() => vi.useRealTimers());
 it('waits for Channels and HTTP shutdown and handles repeated signals once', async () => {
   let finish!: () => void;
@@ -51,4 +51,21 @@ it('bounds a stuck shutdown and reports operation failures without stopping othe
   expect(closeServer).toHaveBeenCalledTimes(1);
   expect(exit).toHaveBeenCalledWith(1);
   expect(report).toHaveBeenCalledTimes(2);
+});
+it('drops idle connections at once and open streams after the grace period', async () => {
+  vi.useFakeTimers();
+  let closed!: () => void;
+  const server = {
+    close: vi.fn((callback: (error?: Error) => void) => {
+      closed = () => callback();
+    }),
+    closeIdleConnections: vi.fn(),
+    closeAllConnections: vi.fn(() => closed()),
+  };
+  const pending = closeHttpServer(server, 3000);
+  expect(server.closeIdleConnections).toHaveBeenCalledOnce();
+  expect(server.closeAllConnections).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(server.closeAllConnections).toHaveBeenCalledOnce();
+  await expect(pending).resolves.toBeUndefined();
 });

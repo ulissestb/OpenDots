@@ -12,10 +12,42 @@ export const pagePatch = z
   .object({
     title: z.string().trim().min(1).max(160).optional(),
     content: z.string().max(100000).optional(),
+    /** Targeted replacements, an alternative to sending the full content. */
+    edits: z
+      .array(
+        z
+          .object({
+            find: z.string().min(1).max(20000),
+            replace: z.string().max(100000),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(50)
+      .optional(),
     parentId: z.string().min(1).nullable().optional(),
     expectedRevision: z.number().int().positive(),
   })
   .strict();
+/** Applies exact, unique find/replace edits in order. */
+export function applyPageEdits(
+  content: string,
+  edits: { find: string; replace: string }[],
+) {
+  return edits.reduce((text, edit, index) => {
+    const at = text.indexOf(edit.find);
+    const label = edits.length > 1 ? `Edit ${index + 1}: ` : '';
+    if (at < 0)
+      throw new PageError(
+        `${label}the find text was not found. Re-read the page and copy the exact text to replace.`,
+      );
+    if (text.indexOf(edit.find, at + 1) >= 0)
+      throw new PageError(
+        `${label}the find text matches more than once. Include more surrounding text so it is unique.`,
+      );
+    return text.slice(0, at) + edit.replace + text.slice(at + edit.find.length);
+  }, content);
+}
 export interface Page {
   id: string;
   spaceId: string;
@@ -168,6 +200,8 @@ export class Pages {
         'A valid page patch and expectedRevision are required.',
       );
     const data = parsed.data;
+    if (data.edits && data.content !== undefined)
+      throw new PageError('Send either content or edits, not both.');
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const page = this.get(spaceId, id);
@@ -176,6 +210,11 @@ export class Pages {
           'This page changed. Reload the latest revision before saving your draft.',
           409,
         );
+      const content = data.edits
+        ? applyPageEdits(page.content, data.edits)
+        : (data.content ?? page.content);
+      if (content.length > 100000)
+        throw new PageError('Pages hold up to 100,000 characters.');
       const parent =
         data.parentId === undefined ? page.parentId : data.parentId;
       this.parent(spaceId, parent, id);
@@ -185,7 +224,7 @@ export class Pages {
         )
         .run(
           data.title ?? page.title,
-          data.content ?? page.content,
+          content,
           parent,
           Date.now(),
           id,

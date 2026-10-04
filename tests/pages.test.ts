@@ -51,3 +51,62 @@ it('rejects cross-space parents, cycles and stale writes without losing content'
   expect(() => store.pages.get(b, root.id)).toThrow();
   store.close();
 });
+it('applies targeted edits with revision checks and exact unique matches', () => {
+  const store = new WorkspaceStore(':memory:', 'owner');
+  const space = store.spaces()[0].id;
+  const page = store.pages.create(space, {
+    title: 'Plan',
+    content: '# Plan\n\nStep one.\nStep two.\nStep two.',
+  });
+  const edited = store.pages.update(space, page.id, {
+    expectedRevision: 1,
+    edits: [
+      { find: 'Step one.', replace: 'Step 1.' },
+      { find: '# Plan', replace: '# Launch plan' },
+    ],
+  });
+  expect(edited).toMatchObject({
+    revision: 2,
+    content: '# Launch plan\n\nStep 1.\nStep two.\nStep two.',
+  });
+  expect(() =>
+    store.pages.update(space, page.id, {
+      expectedRevision: 2,
+      edits: [{ find: 'Step three.', replace: 'x' }],
+    }),
+  ).toThrow('not found');
+  expect(() =>
+    store.pages.update(space, page.id, {
+      expectedRevision: 2,
+      edits: [{ find: 'Step two.', replace: 'x' }],
+    }),
+  ).toThrow('more than once');
+  expect(() =>
+    store.pages.update(space, page.id, {
+      expectedRevision: 2,
+      content: 'All new',
+      edits: [{ find: 'Step 1.', replace: 'x' }],
+    }),
+  ).toThrow('either content or edits');
+  expect(() =>
+    store.pages.update(space, page.id, {
+      expectedRevision: 1,
+      edits: [{ find: 'Step 1.', replace: 'x' }],
+    }),
+  ).toThrow(expect.objectContaining({ status: 409 }));
+  // A failed edit in a batch leaves the page untouched.
+  expect(() =>
+    store.pages.update(space, page.id, {
+      expectedRevision: 2,
+      edits: [
+        { find: 'Step 1.', replace: 'First.' },
+        { find: 'missing', replace: 'x' },
+      ],
+    }),
+  ).toThrow('Edit 2');
+  expect(store.pages.get(space, page.id)).toMatchObject({
+    revision: 2,
+    content: '# Launch plan\n\nStep 1.\nStep two.\nStep two.',
+  });
+  store.close();
+});

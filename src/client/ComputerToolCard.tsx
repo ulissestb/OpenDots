@@ -96,11 +96,15 @@ export function ComputerToolCard({
         ? parameters.path
         : '';
   useEffect(() => {
+    setScreen(undefined);
+    setScreenError('');
+  }, [dotId, showScreen]);
+  // Fetch the current view once; keep polling only while the run is live so
+  // old threads don't screenshot the computer forever.
+  useEffect(() => {
     if (!showScreen) return;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
-    setScreen(undefined);
-    setScreenError('');
     const refresh = async () => {
       if (!document.hidden) {
         try {
@@ -126,7 +130,7 @@ export function ComputerToolCard({
           }
         }
       }
-      if (!controller.signal.aborted)
+      if (running && !controller.signal.aborted)
         timer = setTimeout(() => void refresh(), 3000);
     };
     void refresh();
@@ -134,7 +138,7 @@ export function ComputerToolCard({
       controller.abort();
       clearTimeout(timer);
     };
-  }, [dotId, showScreen]);
+  }, [dotId, showScreen, running]);
   const Icon =
     action === 'exec'
       ? Terminal

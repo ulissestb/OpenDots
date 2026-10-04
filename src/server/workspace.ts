@@ -1,3 +1,4 @@
+import { Skills } from './skills.js';
 import { ComputerStore } from './computer-store.js';
 import { Pages } from './pages.js';
 import { DatabaseSync } from 'node:sqlite';
@@ -5,11 +6,13 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { validateLearningSettings } from '../shared/learning.js';
+import type { ProviderId } from '../shared/providers.js';
 import type { CallReceipt, Conversation, Dot, Space } from '../shared/types.js';
 export class WorkspaceStore {
   private db: DatabaseSync;
   readonly pages: Pages;
   readonly computers: ComputerStore;
+  readonly skills: Skills;
   constructor(
     path: string,
     readonly ownerId: string,
@@ -22,10 +25,17 @@ export class WorkspaceStore {
       CREATE TABLE IF NOT EXISTS thread_bindings(id TEXT PRIMARY KEY, dotId TEXT NOT NULL, ownerId TEXT NOT NULL, title TEXT NOT NULL, createdAt INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS task_threads(taskId TEXT PRIMARY KEY, threadId TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS calls(id TEXT PRIMARY KEY, threadId TEXT NOT NULL, startedAt INTEGER NOT NULL, endedAt INTEGER, status TEXT NOT NULL, transcript TEXT NOT NULL, error TEXT);
-      CREATE TABLE IF NOT EXISTS captures(threadId TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS captures(threadId TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS thread_usage(threadId TEXT PRIMARY KEY, provider TEXT, model TEXT, contextTokens INTEGER NOT NULL, inputTokens INTEGER NOT NULL, outputTokens INTEGER NOT NULL, reasoningTokens INTEGER NOT NULL, cachedInputTokens INTEGER NOT NULL, calls INTEGER NOT NULL, updatedAt INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS delegation_threads(parentThreadId TEXT NOT NULL, dotId TEXT NOT NULL, threadId TEXT NOT NULL, PRIMARY KEY(parentThreadId, dotId));`);
     for (const [table, column, definition] of [
       ['dots', 'learningContainerId', 'TEXT'],
       ['dots', 'skillDeliveryEnabled', 'INTEGER NOT NULL DEFAULT 0'],
+      ['dots', 'provider', 'TEXT'],
+      ['dots', 'model', 'TEXT'],
+      // On by default: the owner opted into Dots delegating to each other.
+      ['dots', 'delegationAllowed', 'INTEGER NOT NULL DEFAULT 1'],
+      ['dots', 'skillAuthoringAllowed', 'INTEGER NOT NULL DEFAULT 1'],
       ['thread_bindings', 'learningContainerId', 'TEXT'],
     ]) {
       if (
@@ -50,6 +60,7 @@ export class WorkspaceStore {
         COMMIT;`);
     }
     this.computers = new ComputerStore(this.db);
+    this.skills = new Skills(this.db);
     this.pages = new Pages(this.db, (id) =>
       this.spaces().some((space) => space.id === id),
     );
@@ -109,6 +120,10 @@ export class WorkspaceStore {
         researchAllowed: !!row.researchAllowed,
         memoryAllowed: !!row.memoryAllowed,
         skillDeliveryEnabled: !!row.skillDeliveryEnabled,
+        delegationAllowed: row.delegationAllowed !== 0,
+        skillAuthoringAllowed: row.skillAuthoringAllowed !== 0,
+        provider: row.provider ?? null,
+        model: row.model ?? null,
       })) as unknown as Dot[];
   }
   dot(id: string) {
@@ -123,6 +138,12 @@ export class WorkspaceStore {
     spaceIds: string[] = [spaceId],
     learningContainerId: string | null = null,
     skillDeliveryEnabled = false,
+    modelChoice: {
+      provider?: ProviderId | null;
+      model?: string | null;
+      delegationAllowed?: boolean;
+      skillAuthoringAllowed?: boolean;
+    } = {},
   ): Dot {
     this.validateSpaceAccess(spaceId, spaceIds);
     validateLearningSettings(learningContainerId, skillDeliveryEnabled);
@@ -136,13 +157,17 @@ export class WorkspaceStore {
       memoryAllowed,
       learningContainerId,
       skillDeliveryEnabled,
+      delegationAllowed: modelChoice.delegationAllowed ?? true,
+      skillAuthoringAllowed: modelChoice.skillAuthoringAllowed ?? true,
+      provider: modelChoice.provider ?? null,
+      model: modelChoice.model ?? null,
       createdAt: Date.now(),
     };
     this.db.exec('BEGIN');
     try {
       this.db
         .prepare(
-          'INSERT INTO dots (id, spaceId, name, instructions, researchAllowed, memoryAllowed, createdAt, learningContainerId, skillDeliveryEnabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          'INSERT INTO dots (id, spaceId, name, instructions, researchAllowed, memoryAllowed, createdAt, learningContainerId, skillDeliveryEnabled, provider, model, delegationAllowed, skillAuthoringAllowed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         )
         .run(
           dot.id,
@@ -154,6 +179,10 @@ export class WorkspaceStore {
           dot.createdAt,
           learningContainerId,
           +skillDeliveryEnabled,
+          dot.provider ?? null,
+          dot.model ?? null,
+          +dot.delegationAllowed,
+          +dot.skillAuthoringAllowed,
         );
       for (const id of dot.spaceIds)
         this.db.prepare('INSERT INTO dot_spaces VALUES (?, ?)').run(dot.id, id);
@@ -186,6 +215,10 @@ export class WorkspaceStore {
       spaceIds?: string[];
       learningContainerId?: string | null;
       skillDeliveryEnabled?: boolean;
+      delegationAllowed?: boolean;
+      skillAuthoringAllowed?: boolean;
+      provider?: ProviderId | null;
+      model?: string | null;
     },
   ): Dot {
     const current = this.dot(id);
@@ -204,7 +237,7 @@ export class WorkspaceStore {
     try {
       this.db
         .prepare(
-          'UPDATE dots SET name=?, instructions=?, researchAllowed=?, memoryAllowed=?, learningContainerId=?, skillDeliveryEnabled=? WHERE id=?',
+          'UPDATE dots SET name=?, instructions=?, researchAllowed=?, memoryAllowed=?, learningContainerId=?, skillDeliveryEnabled=?, provider=?, model=?, delegationAllowed=?, skillAuthoringAllowed=? WHERE id=?',
         )
         .run(
           patch.name,
@@ -213,6 +246,12 @@ export class WorkspaceStore {
           +patch.memoryAllowed,
           learningContainerId,
           +skillDeliveryEnabled,
+          patch.provider === undefined
+            ? (current.provider ?? null)
+            : patch.provider,
+          patch.model === undefined ? (current.model ?? null) : patch.model,
+          +(patch.delegationAllowed ?? current.delegationAllowed),
+          +(patch.skillAuthoringAllowed ?? current.skillAuthoringAllowed),
           id,
         );
       this.db
@@ -271,6 +310,87 @@ export class WorkspaceStore {
     this.db
       .prepare('INSERT INTO task_threads VALUES (?, ?)')
       .run(taskId, threadId);
+  }
+  /** The conversation a Dot reuses each time a parent thread delegates to it. */
+  delegationThread(parentThreadId: string, dotId: string): string | undefined {
+    const row = this.db
+      .prepare(
+        'SELECT threadId FROM delegation_threads WHERE parentThreadId=? AND dotId=?',
+      )
+      .get(parentThreadId, dotId);
+    const threadId = typeof row?.threadId === 'string' ? row.threadId : '';
+    return this.conversations().some(
+      (thread) => thread.id === threadId && thread.dotId === dotId,
+    )
+      ? threadId
+      : undefined;
+  }
+  bindDelegationThread(
+    parentThreadId: string,
+    dotId: string,
+    threadId: string,
+  ) {
+    this.requireThread(threadId, dotId);
+    this.db
+      .prepare(
+        'INSERT INTO delegation_threads VALUES (?, ?, ?) ON CONFLICT(parentThreadId, dotId) DO UPDATE SET threadId=excluded.threadId',
+      )
+      .run(parentThreadId, dotId, threadId);
+  }
+  /** Adds one model call's token use to its conversation. */
+  recordUsage(
+    threadId: string,
+    call: {
+      provider: string;
+      model: string;
+      inputTokens: number;
+      outputTokens: number;
+      reasoningTokens?: number;
+      cachedInputTokens?: number;
+    },
+  ) {
+    const count = (value: number | undefined) =>
+      Number.isFinite(value) && value! > 0 ? Math.round(value!) : 0;
+    const input = count(call.inputTokens);
+    const output = count(call.outputTokens);
+    this.db
+      .prepare(
+        `INSERT INTO thread_usage VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        ON CONFLICT(threadId) DO UPDATE SET provider=excluded.provider, model=excluded.model,
+          contextTokens=excluded.contextTokens, inputTokens=inputTokens+excluded.inputTokens,
+          outputTokens=outputTokens+excluded.outputTokens, reasoningTokens=reasoningTokens+excluded.reasoningTokens,
+          cachedInputTokens=cachedInputTokens+excluded.cachedInputTokens, calls=calls+1, updatedAt=excluded.updatedAt`,
+      )
+      .run(
+        threadId,
+        call.provider,
+        call.model,
+        input + output,
+        input,
+        output,
+        count(call.reasoningTokens),
+        count(call.cachedInputTokens),
+        Date.now(),
+      );
+  }
+  usage(threadId: string) {
+    this.requireThread(threadId);
+    const row = this.db
+      .prepare('SELECT * FROM thread_usage WHERE threadId=?')
+      .get(threadId) as
+      | {
+          provider: string | null;
+          model: string | null;
+          contextTokens: number;
+          inputTokens: number;
+          outputTokens: number;
+          reasoningTokens: number;
+          cachedInputTokens: number;
+          calls: number;
+          updatedAt: number;
+        }
+      | undefined;
+    return row ? { ...row } : undefined;
   }
   taskThread(taskId: string): string | undefined {
     const row = this.db
@@ -343,9 +463,23 @@ export class WorkspaceStore {
   }
   anchorCall(id: string, anchor: string | undefined) {
     this.call(id);
+    // A retried end on an ended call must not move its receipt.
     this.db
-      .prepare('UPDATE calls SET anchorMessageId=? WHERE id=?')
+      .prepare(
+        'UPDATE calls SET anchorMessageId=? WHERE id=? AND (endedAt IS NULL OR anchorMessageId IS NULL)',
+      )
       .run(anchor ?? null, id);
+  }
+  /**
+   * Calls left open by a previous process. Their sessions lived in memory, so
+   * after a restart they can never resume; close them as failed.
+   */
+  failOrphanedCalls() {
+    return this.db
+      .prepare(
+        "UPDATE calls SET status='failed', endedAt=?, error=COALESCE(error, 'The server restarted during this call.') WHERE endedAt IS NULL",
+      )
+      .run(Date.now()).changes;
   }
   setCallError(id: string, error: string | null) {
     this.call(id);

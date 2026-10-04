@@ -3,7 +3,15 @@ import { pageReviewSchema, pageReviewTool } from '../shared/page-review';
 import { contextualMessage, type PageContext } from './page-context';
 import { api } from './api';
 import type { Page } from '../server/pages';
-import { useEffect, useRef, useState } from 'react';
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   CopilotChatToolCallsView,
   useRenderTool,
@@ -29,10 +37,25 @@ import { ChatTranscript, isInternalVoiceReceipt } from './ChatTranscript';
 import type { CallReceipt, Conversation, Dot } from '../shared/types';
 import { Mascot } from './Mascot';
 import { useVoice } from './useVoice';
-import { CallView } from './CallView';
+import {
+  isCoarsePointer,
+  isNearBottom,
+  shouldSendOnEnter,
+  usageSummary,
+} from './ui-helpers';
+import type { ConversationUsage } from '../shared/providers';
+const CallView = lazy(() =>
+  import('./CallView').then((m) => ({ default: m.CallView })),
+);
+const canAutoSize = () =>
+  typeof CSS !== 'undefined' && !!CSS.supports?.('field-sizing', 'content');
+import { MemoryToolCard, isMemoryTool } from './MemoryToolCard';
+import { DelegationToolCard, isDelegationTool } from './DelegationToolCard';
+const noDots: Dot[] = [];
 export function Chat({
   thread,
   dot,
+  dots = noDots,
   initialPrompt,
   onConsumed,
   voiceReady,
@@ -44,6 +67,8 @@ export function Chat({
 }: {
   thread: Conversation;
   dot: Dot;
+  /** All Dots, to name delegation targets. */
+  dots?: Dot[];
   initialPrompt?: string;
   onConsumed: () => void;
   voiceReady: boolean;
@@ -91,16 +116,41 @@ export function Chat({
   const [sourceOpen, setSourceOpen] = useState(false);
   const [error, setError] = useState('');
   const [loaded, setLoaded] = useState(false);
-  const [running, setRunning] = useState(false);
+  // The agent outlives this component (it is shared per thread), so the run
+  // state comes from the agent rather than local bookkeeping.
+  const [agentRunning, setAgentRunning] = useState(agent.isRunning);
+  const [starting, setStarting] = useState(false);
+  const startingRef = useRef(false);
+  const running = (agentRunning || starting) && loaded;
+  const [retryable, setRetryable] = useState(false);
+  const stopped = useRef(false);
   const voice = useVoice(thread.id, onSaved, agent.messages.at(-1)?.id);
   const sent = useRef(false);
-  const bottom = useRef<HTMLDivElement>(null);
+  const transcript = useRef<HTMLDivElement>(null);
+  const textarea = useRef<HTMLTextAreaElement>(null);
+  const followTail = useRef(true);
+  const [usage, setUsage] = useState<ConversationUsage>();
+  // Refresh after each turn and when the Dot's model choice changes.
+  useEffect(() => {
+    if (running) return;
+    let active = true;
+    api<ConversationUsage>(`/conversations/${thread.id}/usage`)
+      .then((value) => active && setUsage(value))
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [thread.id, running, dot.provider, dot.model]);
   useEffect(() => {
     const subscription = copilotkit.subscribe({
       onError: ({ error }) => setError(error.message),
     });
+    setAgentRunning(agent.isRunning);
     const events = agent.subscribe({
       onRunErrorEvent: ({ event }) => setError(event.message),
+      onRunInitialized: () => setAgentRunning(true),
+      onRunFailed: () => setAgentRunning(false),
+      onRunFinalized: () => setAgentRunning(false),
     });
     return () => {
       subscription.unsubscribe();
@@ -125,10 +175,43 @@ export function Chat({
       active = false;
     };
   }, [agent, copilotkit, isReady]);
-  const send = async (text: string) => {
-    if (!text.trim() || running || !loaded || !contextReady || paused) return;
+  const canRun = () =>
+    !startingRef.current &&
+    !agent.isRunning &&
+    loaded &&
+    contextReady &&
+    !paused;
+  const run = async () => {
     setError('');
-    setRunning(true);
+    setRetryable(false);
+    stopped.current = false;
+    followTail.current = true;
+    startingRef.current = true;
+    setStarting(true);
+    try {
+      const result = await copilotkit.runAgent({ agent });
+      // Stop resolves the run without a reply; that is not a failure.
+      if (stopped.current) return;
+      if (!result.newMessages.some((message) => message.role === 'assistant'))
+        throw new Error(
+          'The current turn returned no response. Check the runtime connection and retry.',
+        );
+      onSaved();
+    } catch (e) {
+      if (stopped.current) return;
+      setError(
+        e instanceof Error
+          ? e.message
+          : 'The turn failed. Your conversation remains saved.',
+      );
+      setRetryable(true);
+    } finally {
+      startingRef.current = false;
+      setStarting(false);
+    }
+  };
+  const send = async (text: string) => {
+    if (!text.trim() || !canRun()) return;
     agent.addMessage({
       id: crypto.randomUUID(),
       role: 'user',
@@ -137,22 +220,13 @@ export function Chat({
     setDraft('');
     setSource('');
     setSourceOpen(false);
-    try {
-      const result = await copilotkit.runAgent({ agent });
-      if (!result.newMessages.some((message) => message.role === 'assistant'))
-        throw new Error(
-          'The current turn returned no response. Check the runtime connection and retry.',
-        );
-      onSaved();
-    } catch (e) {
-      setError(
-        e instanceof Error
-          ? e.message
-          : 'The turn failed. Your conversation remains saved.',
-      );
-    } finally {
-      setRunning(false);
-    }
+    await run();
+  };
+  // Retry re-runs the turn for the existing last user message.
+  const canRetry =
+    retryable && !running && agent.messages.at(-1)?.role === 'user';
+  const retry = () => {
+    if (canRetry && canRun()) void run();
   };
   useEffect(() => {
     if (loaded && contextReady && !paused && initialPrompt && !sent.current) {
@@ -161,9 +235,18 @@ export function Chat({
       void send(initialPrompt);
     }
   }, [loaded, contextReady, paused, initialPrompt]);
-  useEffect(() => {
-    bottom.current?.scrollIntoView({ behavior: 'instant', block: 'end' });
-  }, [agent.messages.length, running]);
+  // Follow streaming output only while the reader is already near the bottom.
+  useLayoutEffect(() => {
+    const element = transcript.current;
+    if (element && followTail.current) element.scrollTop = element.scrollHeight;
+  });
+  // Grow the composer with its content where field-sizing is unsupported.
+  useLayoutEffect(() => {
+    const element = textarea.current;
+    if (!element || canAutoSize()) return;
+    element.style.height = 'auto';
+    element.style.height = `${element.scrollHeight}px`;
+  }, [draft]);
   useEffect(() => {
     if (paused && voice.status !== 'idle') void voice.end();
   }, [paused]);
@@ -193,11 +276,19 @@ export function Chat({
       'scroll',
     ].some((action) => call.function.name === `computer_${action}`),
   );
+  // Polling hands over a new Dots array every few seconds; only re-register
+  // the tool renderer when a name actually changes.
+  const dotsKey = dots.map((item) => `${item.id}:${item.name}`).join('|');
+  const delegates = useMemo(() => dots, [dotsKey]);
   useRenderTool(
     {
       name: '*',
       render: (props: ComputerToolRenderProps) =>
-        props.name.startsWith('computer_') ? (
+        isMemoryTool(props.name) ? (
+          <MemoryToolCard {...props} />
+        ) : isDelegationTool(props.name) ? (
+          <DelegationToolCard {...props} dots={delegates} />
+        ) : props.name.startsWith('computer_') ? (
           <ComputerToolCard
             {...props}
             dotId={dot.id}
@@ -208,7 +299,7 @@ export function Chat({
           />
         ) : null,
     },
-    [dot.id, dot.name, running, latestBrowserCall?.id, onComputer],
+    [dot.id, dot.name, delegates, running, latestBrowserCall?.id, onComputer],
   );
   const visible = agent.messages.filter(
     (message) =>
@@ -219,6 +310,8 @@ export function Chat({
           message.toolCalls?.some(
             (call) =>
               call.function.name.startsWith('computer_') ||
+              isMemoryTool(call.function.name) ||
+              isDelegationTool(call.function.name) ||
               call.function.name === pageReviewTool.name,
           ))),
   );
@@ -242,6 +335,14 @@ export function Chat({
                   ? 'Here with you'
                   : 'Connecting to your conversation…'}
           </span>
+          {usage && usageSummary(usage) && (
+            <small
+              className="chat-usage"
+              title={`Provider: ${usage.provider ?? 'none'}. Context is the size of the latest model call. Tokens used: ${usage.inputTokens.toLocaleString()} in (${usage.cachedInputTokens.toLocaleString()} cached), ${usage.outputTokens.toLocaleString()} out (${usage.reasoningTokens.toLocaleString()} reasoning) over ${usage.calls} model calls.`}
+            >
+              {usageSummary(usage)}
+            </small>
+          )}
         </div>
         <div className="chat-persona-actions">
           <button
@@ -284,7 +385,7 @@ export function Chat({
             title={
               voiceReady
                 ? 'Talk with your Dot'
-                : 'Voice setup requires VOICE_API_KEY and VOICE_MODEL'
+                : 'Voice needs a ChatGPT sign-in, or VOICE_API_KEY and VOICE_MODEL'
             }
             disabled={!voiceReady || paused || !loaded || !contextReady}
             onClick={() =>
@@ -307,7 +408,13 @@ export function Chat({
           </a>
         </div>
       )}
-      <div className="chat-transcript">
+      <div
+        className="chat-transcript"
+        ref={transcript}
+        onScroll={(e) => {
+          followTail.current = isNearBottom(e.currentTarget);
+        }}
+      >
         {!visible.length && (
           <div className="chat-welcome">
             <span className="eyebrow">A LITTLE SPACE TO THINK</span>
@@ -336,7 +443,6 @@ export function Chat({
             <span>{dot.name} is thinking</span>
           </div>
         )}
-        <div ref={bottom} />
       </div>
       {contextError && (
         <div className="chat-error" role="alert">
@@ -349,6 +455,11 @@ export function Chat({
       {(error || voice.error) && (
         <div className="chat-error" role="alert">
           {error || voice.error}
+          {error && canRetry && (
+            <button onClick={retry} disabled={paused || !loaded}>
+              Retry
+            </button>
+          )}
           {error && (
             <button
               onClick={() => {
@@ -364,11 +475,11 @@ export function Chat({
           )}
         </div>
       )}
-      <CallView
-        key={voice.status === 'idle' ? 'idle' : 'call'}
-        dot={dot}
-        voice={voice}
-      />
+      {voice.status !== 'idle' && (
+        <Suspense fallback={null}>
+          <CallView key="call" dot={dot} voice={voice} />
+        </Suspense>
+      )}
       <form
         className="chat-composer"
         onSubmit={(e) => {
@@ -409,6 +520,7 @@ export function Chat({
             <Link2 size={19} />
           </button>
           <textarea
+            ref={textarea}
             aria-label="Message your Dot"
             placeholder={`Message ${dot.name}…`}
             rows={1}
@@ -416,7 +528,14 @@ export function Chat({
             maxLength={4000}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
+              if (
+                shouldSendOnEnter({
+                  key: e.key,
+                  shiftKey: e.shiftKey,
+                  isComposing: e.nativeEvent.isComposing || e.keyCode === 229,
+                  coarsePointer: e.key === 'Enter' && isCoarsePointer(),
+                })
+              ) {
                 e.preventDefault();
                 e.currentTarget.form?.requestSubmit();
               }
@@ -427,7 +546,10 @@ export function Chat({
               type="button"
               className="send-button"
               aria-label="Stop response"
-              onClick={() => copilotkit.stopAgent({ agent })}
+              onClick={() => {
+                stopped.current = true;
+                copilotkit.stopAgent({ agent });
+              }}
             >
               <Square size={16} />
             </button>
@@ -444,7 +566,7 @@ export function Chat({
         <div className="chat-compose-note">
           {voiceReady
             ? 'Text and voice, one conversation.'
-            : 'Text is ready. Voice needs separate server configuration.'}
+            : 'Text is ready. Voice needs a ChatGPT sign-in or a Realtime API key.'}
         </div>
       </form>
     </div>

@@ -27,6 +27,7 @@ function fixture(ownerToken?: string) {
       runner: new Runner(store, config),
       config,
       platform,
+      auth: false,
       ownerToken,
     }),
   };
@@ -220,4 +221,31 @@ it('restores review receipts through the owner API with current thread and Space
   const other = ws.createSpace('Other', '');
   ws.updateDot(dot.id, { ...dot, spaceId: other.id, spaceIds: [other.id] });
   expect((await app.request(`${base}/call`, { headers })).status).toBe(403);
+});
+
+it('answers client mistakes with 4xx instead of a service outage', async () => {
+  const { app } = fixture();
+  expect((await app.request('/api/conversations/nope/capture')).status).toBe(
+    403,
+  );
+  expect(
+    (
+      await app.request('/api/spaces', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{bad',
+      })
+    ).status,
+  ).toBe(400);
+  expect((await app.request('/api/voice/calls/nope')).status).toBe(404);
+});
+
+it('reports computer setup and request problems with distinct statuses', async () => {
+  const { ws, app } = fixture();
+  const post = (path: string, body: unknown = {}) =>
+    app.request(path, request(body));
+  expect((await post('/api/dots/nope/computer/start')).status).toBe(404);
+  expect(
+    (await post(`/api/dots/${ws.dots()[0].id}/computer/start`)).status,
+  ).toBe(503);
 });

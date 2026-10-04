@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { createApp } from '../src/server/app.js';
+import { createApp, runtimeBodyLimit } from '../src/server/app.js';
+import { AuthService } from '../src/server/auth.js';
+import { AuthStore } from '../src/server/auth-store.js';
 import { Store } from '../src/server/store.js';
 import { Runner } from '../src/server/runner.js';
 import type { Config } from '../src/server/research.js';
@@ -12,7 +14,7 @@ function fixture(token?: string) {
   return {
     store,
     runner,
-    app: createApp({ store, runner, config, ownerToken: token }),
+    app: createApp({ store, runner, config, auth: false, ownerToken: token }),
   };
 }
 const json = (body: unknown) => ({
@@ -114,4 +116,91 @@ it('rejects DNS-rebinding Host even with a matching hostile Origin', async () =>
     },
   });
   expect(response.status).toBe(403);
+});
+describe('deployment boundaries', () => {
+  const make = (options: { origin?: string; allowedHosts?: string[] } = {}) => {
+    const store = new Store(':memory:');
+    stores.push(store);
+    return createApp({
+      store,
+      runner: new Runner(store, config),
+      config,
+      auth: false,
+      ...options,
+    });
+  };
+  const sized = (bytes: number) => ({
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Length': String(bytes),
+    },
+    body: 'x'.repeat(bytes),
+  });
+  it('allows large agent-runtime bodies but keeps 1 MB elsewhere', async () => {
+    const app = make();
+    expect((await app.request('/api/tasks', sized(2_000_000))).status).toBe(
+      413,
+    );
+    expect(
+      (await app.request('/api/copilotkit/agent/a/run', sized(2_000_000)))
+        .status,
+    ).toBe(404);
+    expect(
+      (await app.request('/api/copilotkit', sized(runtimeBodyLimit + 1)))
+        .status,
+    ).toBe(413);
+  });
+  it('normalizes APP_ORIGIN case and trailing slash', async () => {
+    const app = make({ origin: 'HTTPS://Dots.Example.com/' });
+    const response = await app.request('https://dots.example.com/api/state', {
+      headers: { Origin: 'https://dots.example.com' },
+    });
+    expect(response.status).toBe(200);
+  });
+  it('accepts a same-host Origin on an allowed host, not other local ports', async () => {
+    const app = make({
+      origin: 'https://dots.example.com',
+      allowedHosts: ['192.168.1.5'],
+    });
+    expect(
+      (
+        await app.request('http://192.168.1.5:4310/api/state', {
+          headers: { Origin: 'http://192.168.1.5:4310' },
+        })
+      ).status,
+    ).toBe(200);
+    // TLS terminated at the proxy: the app sees http, the browser https.
+    expect(
+      (
+        await app.request('http://dots.example.com/api/state', {
+          headers: { Origin: 'https://dots.example.com' },
+        })
+      ).status,
+    ).toBe(200);
+    for (const [url, origin] of [
+      ['http://localhost:4310/api/state', 'http://localhost:3000'],
+      ['http://192.168.1.5:4310/api/state', 'http://localhost:4310'],
+      ['http://localhost:4310/api/state', 'null'],
+    ])
+      expect(
+        (await app.request(url, { headers: { Origin: origin } })).status,
+      ).toBe(403);
+  });
+  it('serves an unauthenticated health check without details', async () => {
+    const store = new Store(':memory:');
+    const authStore = new AuthStore(':memory:');
+    stores.push(store);
+    const app = createApp({
+      store,
+      runner: new Runner(store, config),
+      config,
+      auth: new AuthService(authStore, [], false),
+    });
+    const health = await app.request('/api/health');
+    expect(health.status).toBe(200);
+    expect(await health.json()).toEqual({ ok: true });
+    expect((await app.request('/api/state')).status).toBe(401);
+    authStore.close();
+  });
 });

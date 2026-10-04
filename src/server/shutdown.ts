@@ -44,3 +44,26 @@ export function createShutdown(options: {
       options.exit(failed ? 1 : 0);
     })());
 }
+/**
+ * Stops accepting connections and drops idle keep-alives at once; open
+ * streams (agent runs, SSE) get `graceMs` before they are cut, so `close`
+ * finishes well within the shutdown deadline.
+ */
+export function closeHttpServer(
+  server: {
+    close(callback: (error?: Error) => void): unknown;
+    closeIdleConnections?(): void;
+    closeAllConnections?(): void;
+  },
+  graceMs = 3000,
+) {
+  return new Promise<void>((resolve, reject) => {
+    const force = setTimeout(() => server.closeAllConnections?.(), graceMs);
+    server.close((error) => {
+      clearTimeout(force);
+      if (error) reject(error);
+      else resolve();
+    });
+    server.closeIdleConnections?.();
+  });
+}

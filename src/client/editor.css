@@ -1080,7 +1080,7 @@
     gap: 4px;
   }
   .document-save-status {
-    font-size: 10px;
+    font-size: 11px;
     gap: 4px;
     padding: 0;
   }
@@ -1222,4 +1222,13 @@
 .template-app .pause-button > span {
   color: #53624d;
   font-size: 11px;
+}
+
+@media (max-width: 700px) {
+  .template-app .template-label,
+  .template-app .version,
+  .template-app .mode-badge,
+  .slash-menu-label {
+    font-size: 11px;
+  }
 }

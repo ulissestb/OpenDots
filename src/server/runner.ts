@@ -2,6 +2,7 @@ import { Store } from './store.js';
 import type { Result, Memory } from '../shared/types.js';
 import type { Claim } from './store.js';
 import { research, type Config } from './research.js';
+import { defaultRunTimeoutMs } from './platform-config.js';
 export class Runner {
   private timer?: ReturnType<typeof setInterval>;
   private active = new Map<string, AbortController>();
@@ -13,12 +14,13 @@ export class Runner {
       memories: Memory[],
       signal: AbortSignal,
       progress: (text: string) => void,
+      started: () => void,
     ) => Promise<Result>,
   ) {}
   start() {
     if (!this.timer) {
-      this.timer = setInterval(() => void this.tick(), 1000);
-      void this.tick();
+      this.timer = setInterval(() => void this.safeTick(), 1000);
+      void this.safeTick();
     }
   }
   stop() {
@@ -40,26 +42,52 @@ export class Runner {
     for (const controller of this.active.values())
       controller.abort(new Error('Run stopped because settings changed.'));
   }
+  /** A database error must not crash the process; the next tick retries. */
+  private async safeTick() {
+    try {
+      await this.tick();
+    } catch (error) {
+      console.error('Scheduler tick failed:', describe(error));
+    }
+  }
   async tick() {
     if (this.active.size) return;
-    const claim = this.store.claim();
+    // The agent enforces its own budget; the runner waits a little longer so
+    // the agent's error surfaces, and the lease outlives both.
+    const agentTimeout = this.config.runTimeoutMs ?? defaultRunTimeoutMs;
+    const timeoutMs = agentTimeout + 15_000;
+    const claim = this.store.claim(Date.now(), timeoutMs + 120_000);
     if (!claim) return;
     const controller = new AbortController();
     this.active.set(claim.id, controller);
     const ownershipCheck = setInterval(() => {
-      if (!this.store.owns(claim))
-        controller.abort(new Error('Run permission or lease was revoked.'));
+      try {
+        if (!this.store.owns(claim))
+          controller.abort(new Error('Run permission or lease was revoked.'));
+      } catch (error) {
+        console.error('Scheduler ownership check failed:', describe(error));
+      }
     }, 100);
-    const timeout = setTimeout(
-      () =>
-        controller.abort(
-          new Error('Research exceeded the 90 second time limit.'),
+    const expire = () =>
+      controller.abort(
+        new Error(
+          `Task exceeded the ${Math.round(timeoutMs / 1000)} second time limit.`,
         ),
-      90_000,
-    );
+      );
+    let timeout = setTimeout(expire, timeoutMs);
+    // A turn may wait behind another on its conversation; the budget (and the
+    // lease) start again when the agent actually starts.
+    const started = () => {
+      clearTimeout(timeout);
+      timeout = setTimeout(expire, timeoutMs);
+      this.store.renew(claim, Date.now() + timeoutMs + 120_000);
+    };
     try {
       const settings = this.store.settings();
-      const memories = settings.memoryAllowed ? this.store.memories() : [];
+      // Tasks have no Dot here, so only global memories apply.
+      const memories = settings.memoryAllowed
+        ? this.store.promptMemories(null)
+        : [];
       const progress = (text: string) => {
         if (!this.store.owns(claim))
           controller.abort(new Error('Run permission or lease was revoked.'));
@@ -67,7 +95,13 @@ export class Runner {
         this.store.event(claim.id, claim.lease, text);
       };
       const result = this.execute
-        ? await this.execute(claim, memories, controller.signal, progress)
+        ? await this.execute(
+            claim,
+            memories,
+            controller.signal,
+            progress,
+            started,
+          )
         : await research(
             claim.prompt,
             memories,
@@ -78,10 +112,17 @@ export class Runner {
       controller.signal.throwIfAborted();
       this.store.finish(claim, result);
     } catch (error) {
-      this.store.fail(
-        claim,
-        error instanceof Error ? error.message : 'Unexpected research failure.',
-      );
+      try {
+        this.store.fail(
+          claim,
+          error instanceof Error
+            ? error.message
+            : 'Unexpected research failure.',
+        );
+      } catch (storeError) {
+        // The lease expires and the task is retried.
+        console.error('Recording a failed run failed:', describe(storeError));
+      }
     } finally {
       clearInterval(ownershipCheck);
       clearTimeout(timeout);
@@ -89,3 +130,13 @@ export class Runner {
     }
   }
 }
+// Name and code only (e.g. ERR_SQLITE_ERROR): messages can carry provider details.
+const describe = (error: unknown) => {
+  const code =
+    error !== null && typeof error === 'object' && 'code' in error
+      ? String(error.code)
+      : '';
+  return error instanceof Error
+    ? `${error.name}${code ? ` (${code})` : ''}`
+    : 'Unknown error';
+};

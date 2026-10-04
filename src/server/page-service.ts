@@ -1,4 +1,8 @@
 import { randomUUID } from 'node:crypto';
+import {
+  internalMessagePrefix,
+  voiceReceiptMessagePrefix,
+} from '../shared/voice-receipt.js';
 import { PageError } from './pages.js';
 import type { WorkspaceStore } from './workspace.js';
 export interface PageIntelligence {
@@ -11,7 +15,7 @@ export interface PageIntelligence {
   getThreadMessages(input: {
     threadId: string;
     userId: string;
-  }): Promise<{ messages: { role: string; content?: unknown }[] }>;
+  }): Promise<{ messages: { id?: string; role: string; content?: unknown }[] }>;
 }
 async function bounded<T>(operation: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -110,6 +114,16 @@ export class PageService {
     const chunks: string[] = [];
     for (const message of history.messages) {
       if (!['user', 'assistant'].includes(message.role)) continue;
+      // Call receipts are bookkeeping prompts, not part of the conversation.
+      if (message.id?.startsWith(voiceReceiptMessagePrefix)) continue;
+      // Scheduled, voice and delegated prompts come from the server, so they
+      // must not be labelled as the owner's own words.
+      const speaker =
+        message.role === 'assistant'
+          ? 'Dot'
+          : message.id?.startsWith(internalMessagePrefix)
+            ? 'Automated request'
+            : 'You';
       let text = '';
       if (typeof message.content === 'string') text = message.content;
       else if (Array.isArray(message.content)) {
@@ -124,8 +138,7 @@ export class PageService {
           )
           .join('\n');
       }
-      if (text.trim())
-        chunks.push(`## ${message.role === 'user' ? 'You' : 'Dot'}\n\n${text}`);
+      if (text.trim()) chunks.push(`## ${speaker}\n\n${text}`);
     }
     const content = chunks.join('\n\n');
     if (!content)

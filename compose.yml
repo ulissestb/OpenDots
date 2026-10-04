@@ -6,8 +6,15 @@ services:
     ports:
       - '127.0.0.1:4310:4310'
     environment:
-      OWNER_TOKEN: ${OWNER_TOKEN:?Set a 24+ character OWNER_TOKEN in .env}
+      OWNER_TOKEN: ${OWNER_TOKEN:-}
       APP_ORIGIN: ${APP_ORIGIN:-http://localhost:4310}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-auto}
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+      ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:-}
+      ADMIN_PASSWORD_RESET: ${ADMIN_PASSWORD_RESET:-}
+      CREDENTIALS_SECRET: ${CREDENTIALS_SECRET:-}
+      OPENAI_CODEX_MODEL: ${OPENAI_CODEX_MODEL:-}
       OWNER_ID: ${OWNER_ID:-opendots-owner}
       INTELLIGENCE_API_KEY: ${INTELLIGENCE_API_KEY:-}
       INTELLIGENCE_API_URL: ${INTELLIGENCE_API_URL:-}
@@ -15,6 +22,9 @@ services:
       VOICE_API_KEY: ${VOICE_API_KEY:-}
       VOICE_MODEL: ${VOICE_MODEL:-}
       VOICE_NAME: ${VOICE_NAME:-marin}
+      VOICE_CHATGPT_MODEL: ${VOICE_CHATGPT_MODEL:-}
+      VOICE_CHATGPT_VOICE: ${VOICE_CHATGPT_VOICE:-}
+      AGENT_RUN_TIMEOUT_SECONDS: ${AGENT_RUN_TIMEOUT_SECONDS:-300}
       SLACK_CHANNEL_NAME: ${SLACK_CHANNEL_NAME:-}
       SLACK_TEAM_ID: ${SLACK_TEAM_ID:-}
       SLACK_USER_IDS: ${SLACK_USER_IDS:-}
@@ -22,6 +32,8 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       OPENAI_MODEL: ${OPENAI_MODEL:-}
+      MODEL_MAX_OUTPUT_TOKENS: ${MODEL_MAX_OUTPUT_TOKENS:-}
+      MODEL_REASONING_EFFORT: ${MODEL_REASONING_EFFORT:-}
       WEB_SEARCH_PROVIDER: ${WEB_SEARCH_PROVIDER:-parallel}
       PARALLEL_API_KEY: ${PARALLEL_API_KEY:-}
       BROWSER_URL: http://browser:4311
@@ -33,6 +45,8 @@ services:
       - app-egress
     init: true
     restart: unless-stopped
+    # Lets in-flight requests finish; the server force-closes streams sooner.
+    stop_grace_period: 15s
     security_opt:
       - no-new-privileges:true
     cap_drop:

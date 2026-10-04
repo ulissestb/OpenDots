@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   parallelSources,
+  shortObjective,
   sourcesFromResult,
   webSearchProvider,
 } from '../src/server/parallel.js';
@@ -180,4 +181,60 @@ it('preserves long research intent and records partial source failures', async (
   expect(warn).toHaveBeenCalledWith(
     expect.stringContaining('coverage is incomplete'),
   );
+});
+
+it('falls back to search excerpts when page extraction fails', async () => {
+  mcp.callTool
+    .mockResolvedValueOnce(result(page(), page('https://example.org')))
+    .mockRejectedValueOnce(new Error('fetch upstream failed'));
+  const warn = vi.fn();
+  const sources = await parallelSources(
+    { objective: 'Research', onWarning: warn },
+    {},
+    signal,
+  );
+  expect(sources.map((item) => item.url)).toEqual([
+    'https://example.com',
+    'https://example.org',
+  ]);
+  expect(warn).toHaveBeenCalledWith(expect.stringContaining('search excerpts'));
+  expect(mcp.close).toHaveBeenCalledOnce();
+});
+
+it('still fails when a supplied URL cannot be extracted', async () => {
+  mcp.callTool.mockResolvedValueOnce(result());
+  await expect(
+    parallelSources(
+      { objective: 'Read', urls: ['https://example.com'] },
+      {},
+      signal,
+    ),
+  ).rejects.toThrow('could not extract');
+});
+
+it('reads up to eight sources with bounded excerpts', async () => {
+  const many = Array.from({ length: 10 }, (_, i) => ({
+    ...page(`https://example.com/${i}`),
+    excerpts: ['x'.repeat(10_000)],
+  }));
+  mcp.callTool
+    .mockResolvedValueOnce(result(...many))
+    .mockResolvedValueOnce(result(...many));
+  const sources = await parallelSources(
+    { objective: 'Research', searchQueries: ['a', 'b', 'c', 'd', 'e'] },
+    {},
+    signal,
+  );
+  expect(mcp.callTool.mock.calls[1][0].arguments.urls).toHaveLength(8);
+  expect(sources).toHaveLength(8);
+  expect(JSON.stringify(sources).length).toBeLessThanOrEqual(40_000);
+});
+
+it('shortens long fetch objectives at a word boundary', () => {
+  const objective = 'Compare battery chemistry tradeoffs '.repeat(10);
+  const short = shortObjective(objective);
+  expect(short.length).toBeLessThanOrEqual(200);
+  expect(short.startsWith('Compare battery chemistry tradeoffs')).toBe(true);
+  expect(short.endsWith('…')).toBe(true);
+  expect(shortObjective('Read')).toBe('Read');
 });

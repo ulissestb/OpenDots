@@ -2,7 +2,7 @@
 
 OpenDots connects each specialist to its own container through [OpenBot](https://github.com/CopilotKit/OpenBot)'s computer service and supervisor. A Dot's ID determines its computer and persistent volumes. Files and browser profiles survive stop/start; they are separate from Spaces pages and CopilotKit conversation history.
 
-The app exposes selected computer tools to the same Dot agent used by web chat, Slack, scheduled work, and voice's compute delegation. Browser, workspace-file, and shell permissions are saved per Dot and checked by the server. They start disabled. No action falls back to your host's shell or files when the computer service is unavailable.
+The app exposes selected computer tools to the same Dot agent used by web chat, Slack, scheduled work, and voice's compute delegation. Browser, workspace-file, and shell permissions are saved per Dot and checked by the server. They start enabled so every Dot can edit code, run commands and CLIs, and browse in its own container; turn any of them off in a Dot's **Computer** panel. When an agent uses a tool while its computer is stopped, the app starts it. No action falls back to your host's shell or files when the computer service is unavailable.
 
 ## Start services for local development
 
@@ -20,21 +20,23 @@ Do not use the placeholder values. The supervisor token authorizes lifecycle req
 Build both images before starting the supervisor:
 
 ```sh
-docker compose -f compose.computers.yml build computer-image computer-supervisor
+docker compose -f compose.computers.yml build computer-image
+docker compose -f compose.computers.yml build computer-dev-image computer-supervisor
 docker compose -f compose.computers.yml up -d computer-supervisor
 npm run dev
 ```
 
 The computer-image service is a build target, not a shared computer to run. The supervisor creates a container when you start a Dot's computer. In this local arrangement, each computer publishes a dynamic loopback port for the app to reach. Port 4312 is the loopback supervisor endpoint. The local control network uses a normal bridge so Docker can publish that port. The container-app overlay makes the control network internal and removes the host port; the app then connects through service DNS.
 
-Open a Dot's **Computer** panel, enable computer access and the capabilities you want, then choose **Start**. Check its status, navigate to a page, and refresh its screen. Only grant shell access when that Dot needs to run commands.
+Ask a Dot to do computer work, in chat or by voice, and its computer starts on first use. You can also open its **Computer** panel to start it, check status, or watch the browser. Computers run `opendots-computer-dev`, the OpenBot image plus git, Python, ripgrep, jq, and build tools; set `COMPUTER_IMAGE=opendots-computer:b6932d3` to use the bare image. Code and repositories live in the computer's `/workspace` volume, not on your host. Turn off shell access for Dots that should not run commands.
 
 ## Run the application in containers
 
-Configure the existing `OWNER_TOKEN` and `BROWSER_SECRET` as well as the computer secrets. Use the overlay that connects the app to the supervisor and computer network:
+Configure the existing `BROWSER_SECRET` as well as the computer secrets. Use the overlay that connects the app to the supervisor and computer network:
 
 ```sh
-docker compose -f compose.yml -f compose.computers.yml -f compose.computers-app.yml build computer-image computer-supervisor app browser
+docker compose -f compose.yml -f compose.computers.yml -f compose.computers-app.yml build computer-image
+docker compose -f compose.yml -f compose.computers.yml -f compose.computers-app.yml build computer-dev-image computer-supervisor app browser
 docker compose -f compose.yml -f compose.computers.yml -f compose.computers-app.yml up -d app browser computer-supervisor
 ```
 

@@ -6,7 +6,10 @@ import { createHmac } from 'node:crypto';
 import { WorkspaceStore } from '../src/server/workspace.js';
 import { ComputerService } from '../src/server/computer-service.js';
 import { computerInputs } from '../src/shared/computer-types.js';
-import { computerTools } from '../src/server/computer-tools.js';
+import {
+  computerTools,
+  limitToolResult,
+} from '../src/server/computer-tools.js';
 const stores: WorkspaceStore[] = [];
 afterEach(() => {
   for (const store of stores.splice(0)) store.close();
@@ -91,23 +94,26 @@ function fixture(deadline = 1000) {
     },
   };
 }
-it('defaults every permission off and persists policy and metadata-only audit across restart', () => {
+it('defaults every permission on and persists policy and metadata-only audit across restart', () => {
   const dir = mkdtempSync(join(tmpdir(), 'computers-'));
   const path = join(dir, 'db');
   let workspace = new WorkspaceStore(path, 'owner');
   const id = workspace.dots()[0].id;
   expect(workspace.computers.permissions(id)).toEqual({
-    enabled: false,
-    browser: false,
-    files: false,
-    shell: false,
+    enabled: true,
+    browser: true,
+    files: true,
+    shell: true,
   });
-  workspace.computers.patch(id, { enabled: true, files: true });
+  workspace.computers.patch(id, { shell: false });
   const audit = workspace.computers.begin(id, 'files_write', 'agent');
   workspace.computers.finish(audit, 'succeeded');
   workspace.close();
   workspace = new WorkspaceStore(path, 'owner');
-  expect(workspace.computers.permissions(id).files).toBe(true);
+  expect(workspace.computers.permissions(id)).toMatchObject({
+    files: true,
+    shell: false,
+  });
   expect(workspace.computers.audit(id)[0]).toMatchObject({
     action: 'files_write',
     outcome: 'succeeded',
@@ -304,4 +310,103 @@ it('gives agents a safe recovery instruction for stale browser or control confli
     f.service.action(f.id, 'navigate', { url: 'https://example.com' }, 'agent'),
   ).rejects.not.toThrow(f.config.computerToken);
   expect(f.workspace.computers.audit(f.id)[0].outcome).toBe('failed');
+});
+it('starts a stopped computer for agent work but not for owner actions', async () => {
+  const workspace = new WorkspaceStore(':memory:', 'owner');
+  stores.push(workspace);
+  const id = workspace.dots()[0].id;
+  const urls: string[] = [];
+  let started = false;
+  const transport: typeof fetch = async (input) => {
+    const url = String(input);
+    urls.push(url);
+    if (url.endsWith('/computers'))
+      return Response.json({
+        computers: [
+          {
+            botId: id,
+            container: `opendots-computer-${id}`,
+            status: started ? 'running' : 'stopped',
+            ...(started ? { port: 46489 } : {}),
+          },
+        ],
+      });
+    if (url.endsWith('/ensure')) {
+      started = true;
+      // A new container's ensure reply omits its published port.
+      return Response.json({
+        botId: id,
+        container: `opendots-computer-${id}`,
+        status: 'running',
+      });
+    }
+    return Response.json({ exitCode: 0, stdout: 'v24' });
+  };
+  const service = new ComputerService(
+    workspace,
+    {
+      baseUrl: 'https://example.com',
+      voiceName: 'voice',
+      slackUsers: [],
+      runtimeUrl: 'http://localhost',
+      computerSupervisorUrl: 'http://127.0.0.1:4312',
+      computerSupervisorToken: 'supervisor-secret',
+      computerToken: 'master-secret',
+    },
+    () => false,
+    transport,
+  );
+  await expect(
+    service.action(id, 'exec', { command: 'node -v' }, 'owner'),
+  ).rejects.toThrow('Start this Dot’s computer first.');
+  expect(urls.some((url) => url.endsWith('/ensure'))).toBe(false);
+  await expect(
+    service.action(id, 'exec', { command: 'node -v' }, 'agent'),
+  ).resolves.toEqual({ exitCode: 0, stdout: 'v24' });
+  expect(urls.slice(-3)).toEqual([
+    `http://127.0.0.1:4312/computers/${id}/ensure`,
+    'http://127.0.0.1:4312/computers',
+    'http://127.0.0.1:46489/exec',
+  ]);
+  workspace.computers.patch(id, { shell: false });
+  await expect(
+    service.action(id, 'exec', { command: 'node -v' }, 'agent'),
+  ).rejects.toThrow('Computer permission is disabled.');
+});
+it('bounds agent tool results, drops image data, and hides screenshots', async () => {
+  const f = fixture();
+  const tools = computerTools(
+    f.service,
+    f.id,
+    () => {},
+    new AbortController().signal,
+  );
+  expect(tools.map((t) => t.name)).not.toContain('computer_screenshot');
+  const descriptions = tools.map((t) => t.description);
+  expect(new Set(descriptions).size).toBe(tools.length);
+  f.handle(async () =>
+    Response.json({
+      contents: 'x'.repeat(100_000),
+      preview: `data:image/png;base64,${'A'.repeat(5000)}`,
+      path: 'big.log',
+    }),
+  );
+  const read = tools.find((t) => t.name === 'computer_files_read')!;
+  const result = (await read.execute?.({ path: 'big.log' })) as Record<
+    string,
+    string
+  >;
+  expect(JSON.stringify(result).length).toBeLessThanOrEqual(40_000);
+  expect(result.path).toBe('big.log');
+  expect(result.contents).toMatch(/…\[truncated \d+ characters/);
+  expect(result.preview).toBe('[image data omitted]');
+});
+it('passes small agent tool results through unchanged', () => {
+  const value = { entries: [{ name: 'a.txt' }], text: 'short' };
+  expect(limitToolResult(value)).toEqual(value);
+  const huge = Array.from({ length: 20_000 }, (_, i) => ({ name: `f${i}` }));
+  const bounded = limitToolResult(huge);
+  expect(typeof bounded).toBe('string');
+  expect(String(bounded)).toMatch(/truncated \d+ characters/);
+  expect(String(bounded).length).toBeLessThan(40_200);
 });
