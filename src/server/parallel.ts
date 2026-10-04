@@ -36,9 +36,22 @@ export interface WebSource {
   url: string;
   text: string;
 }
+/** Sources read per call; with the excerpt cap this keeps a result near 36k chars. */
+export const maxSources = 8;
+const maxExcerptChars = 4500;
+const maxFetchObjective = 200;
+/** Shortens an objective at a word boundary for web_fetch's 200-char limit. */
+export function shortObjective(objective: string, limit = maxFetchObjective) {
+  const text = objective.replace(/\s+/g, ' ').trim();
+  if (text.length <= limit) return text;
+  const cut = text.slice(0, limit - 1);
+  const space = cut.lastIndexOf(' ');
+  return `${(space > limit / 2 ? cut.slice(0, space) : cut).trimEnd()}…`;
+}
 export function sourcesFromResult(
   result: unknown,
   warn: (message: string) => void = () => {},
+  limit = maxSources,
 ): WebSource[] {
   const envelope = z
     .object({
@@ -97,11 +110,11 @@ export function sourcesFromResult(
         {
           title: value.title || value.url,
           url: value.url,
-          text: value.excerpts.join('\n').slice(0, 6000),
+          text: value.excerpts.join('\n').slice(0, maxExcerptChars),
         },
       ];
     })
-    .slice(0, 5);
+    .slice(0, limit);
   if (discarded)
     warn(
       `Skipped ${discarded} malformed or empty source result(s); coverage is incomplete.`,
@@ -148,8 +161,9 @@ export async function parallelSources(
   try {
     await client.connect(transport);
     let urls = request.urls;
+    let found: WebSource[] = [];
     if (!urls?.length) {
-      const found = sourcesFromResult(
+      found = sourcesFromResult(
         await client.callTool(
           {
             name: 'web_search',
@@ -167,32 +181,40 @@ export async function parallelSources(
         );
     }
     for (const url of urls) source.shape.url.parse(url);
-    const pages = sourcesFromResult(
-      await client.callTool(
-        {
-          name: 'web_fetch',
-          arguments: {
-            urls: urls.slice(0, 5),
-            objective:
-              objective.length <= 200
-                ? objective
-                : 'Extract source evidence relevant to the supplied research queries.',
-            search_queries,
-            session_id,
+    let pages: WebSource[];
+    try {
+      pages = sourcesFromResult(
+        await client.callTool(
+          {
+            name: 'web_fetch',
+            arguments: {
+              urls: urls.slice(0, maxSources),
+              // Keep the start of a long objective rather than a generic one.
+              objective: shortObjective(objective),
+              search_queries,
+              session_id,
+            },
           },
-        },
-        undefined,
-        { signal: boundedSignal },
-      ),
-      warn,
-    );
-    if (urls.length > 5)
-      warn('Only the first five URLs were read; coverage is limited.');
-    if (pages.length < Math.min(urls.length, 5))
+          undefined,
+          { signal: boundedSignal },
+        ),
+        warn,
+      );
+      if (!pages.length)
+        throw new Error('Parallel could not extract usable source evidence.');
+    } catch (error) {
+      // Search excerpts still ground an answer when full extraction fails.
+      if (boundedSignal.aborted || !found.length) throw error;
+      warn(
+        'Full page extraction failed, so these are shorter search excerpts; verify key claims with read_public_page.',
+      );
+      return found;
+    }
+    if (urls.length > maxSources)
+      warn(`Only the first ${maxSources} URLs were read; coverage is limited.`);
+    if (pages.length < Math.min(urls.length, maxSources))
       warn('Some requested sources could not be read; coverage is incomplete.');
     boundedSignal.throwIfAborted();
-    if (!pages.length)
-      throw new Error('Parallel could not extract usable source evidence.');
     return pages;
   } finally {
     await client.close().catch(() => {});

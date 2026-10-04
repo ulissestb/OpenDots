@@ -63,7 +63,7 @@ it('checks abort again before sending source evidence or memories to the model',
 });
 it('omits stored memories from research when memory permission is disabled', async () => {
   const store = new Store(':memory:');
-  store.saveMemory('Sensitive preference');
+  store.saveMemory({ text: 'Sensitive preference' });
   store.updateSettings({ memoryAllowed: false });
   const task = store.createTask('Read this sample');
   const runner = new Runner(store, { mode: 'sample', baseUrl: '' });
@@ -94,5 +94,33 @@ it('requeues active work on graceful shutdown instead of losing it', async () =>
   await pending;
   expect(store.tasks()[0].status).toBe('queued');
   expect(store.claim()).toBeTruthy();
+  store.close();
+});
+it('survives database errors in the scheduler tick', async () => {
+  const store = new Store(':memory:');
+  const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const claim = vi.spyOn(store, 'claim').mockImplementation(() => {
+    throw new Error('database is locked');
+  });
+  const runner = new Runner(store, { mode: 'sample', baseUrl: '' });
+  runner.start();
+  await vi.waitFor(() =>
+    expect(errors).toHaveBeenCalledWith(
+      'Scheduler tick failed:',
+      expect.any(String),
+    ),
+  );
+  claim.mockRestore();
+  // A failure while recording the failure does not reject the tick either.
+  store.createTask('Read this sample');
+  vi.spyOn(store, 'fail').mockImplementation(() => {
+    throw new Error('disk I/O error');
+  });
+  const failing = new Runner(store, { mode: 'sample', baseUrl: '' }, () =>
+    Promise.reject(new Error('Model failed')),
+  );
+  await expect(failing.tick()).resolves.toBeUndefined();
+  runner.stop();
+  errors.mockRestore();
   store.close();
 });

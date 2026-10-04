@@ -1,25 +1,94 @@
+import { randomBytes } from 'node:crypto';
+import { AuthService, cookieSecure, envFlag } from './auth.js';
+import { AuthStore, defaultAdmin, initialAdminPassword } from './auth-store.js';
 import { webSearchProvider } from './parallel.js';
-import { createShutdown } from './shutdown.js';
+import { closeHttpServer, createShutdown } from './shutdown.js';
 import { reportChannelFailure, safeFailure } from './slack-channel.js';
 import { serve } from '@hono/node-server';
+import type { Server } from 'node:http';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { Store } from './store.js';
 import { Runner } from './runner.js';
 import { createApp } from './app.js';
 import { WorkspaceStore } from './workspace.js';
 import { Platform } from './platform.js';
-import type { PlatformConfig } from './platform-config.js';
+import {
+  type PlatformConfig,
+  maxOutputTokens,
+  reasoningEffort,
+  runTimeoutMs,
+} from './platform-config.js';
+import { McpService } from './mcp.js';
+import { McpStore } from './mcp-store.js';
+import { ProviderCredentialStore } from './providers/credential-store.js';
+import { CodexAuth } from './providers/codex-auth.js';
+import { ProviderRegistry } from './providers/registry.js';
+import { SqliteAgentRunner } from './sqlite-runner.js';
 const host = process.env.HOST ?? '127.0.0.1';
 const port = Number(process.env.PORT ?? 4310);
-const ownerToken = process.env.OWNER_TOKEN;
-if (
-  !['127.0.0.1', '::1', 'localhost'].includes(host) &&
-  (!ownerToken || ownerToken.length < 24)
-)
+const ownerToken = process.env.OWNER_TOKEN || undefined;
+const configuredOrigin =
+  process.env.APP_ORIGIN ||
+  (process.env.NODE_ENV === 'development'
+    ? 'http://127.0.0.1:5173'
+    : undefined);
+// Normalized (case, trailing slash); an invalid APP_ORIGIN stops startup.
+const appOrigin = configuredOrigin
+  ? new URL(configuredOrigin).origin
+  : undefined;
+const allowedHosts = (process.env.ALLOWED_HOSTS ?? '')
+  .split(',')
+  .map((value) => value.trim())
+  .filter(Boolean);
+const external = !['127.0.0.1', '::1', 'localhost'].includes(host);
+const wildcard = ['0.0.0.0', '::', '[::]', ''].includes(host);
+if (ownerToken && ownerToken.length < 24)
+  throw new Error('OWNER_TOKEN must be at least 24 characters.');
+if (external && !process.env.APP_ORIGIN && !allowedHosts.length && !ownerToken)
   throw new Error(
-    'External binding requires an OWNER_TOKEN of at least 24 characters.',
+    'External binding requires APP_ORIGIN, ALLOWED_HOSTS, or an OWNER_TOKEN of at least 24 characters.',
   );
+// Lets the server call its own runtime (scheduled work, voice compute).
+const internalToken = randomBytes(32).toString('base64url');
 const database = process.env.DATABASE_PATH ?? 'data/opendots.sqlite';
+const seed = initialAdminPassword(
+  process.env.ADMIN_INITIAL_PASSWORD || undefined,
+  external,
+);
+const authStore = new AuthStore(database, seed.password);
+if (authStore.seeded && seed.generated)
+  console.warn(
+    `\n*** OpenDots created the admin user with a one-time password: ${seed.password}\n*** Sign in as ${defaultAdmin.username} with it and choose a new password. It is not shown again. ***\n`,
+  );
+if (process.env.ADMIN_PASSWORD_RESET) {
+  authStore.resetPassword(
+    defaultAdmin.username,
+    process.env.ADMIN_PASSWORD_RESET,
+  );
+  console.warn(
+    'Admin password reset from ADMIN_PASSWORD_RESET; remove it from the environment.',
+  );
+}
+if (authStore.isDefaultPassword())
+  console.warn(
+    external
+      ? '\n*** WARNING: OpenDots is reachable from other hosts and the admin password is still the default "admin". Sign in now and change it. ***\n'
+      : 'Sign in as admin/admin and choose a new password on first use.',
+  );
+const trustProxy = envFlag(process.env.TRUST_PROXY);
+if (appOrigin?.startsWith('https:') && !trustProxy)
+  console.warn(
+    'APP_ORIGIN is HTTPS but TRUST_PROXY is off: behind a reverse proxy, every client shares one sign-in rate-limit bucket. Set TRUST_PROXY=true if a single proxy you control forwards X-Forwarded-For.',
+  );
+const auth = new AuthService(
+  authStore,
+  [ownerToken, internalToken].filter((token): token is string => !!token),
+  cookieSecure(process.env.COOKIE_SECURE, appOrigin),
+  Date.now,
+  { trustProxy },
+);
+const pruneTimer = setInterval(() => authStore.pruneSessions(), 3_600_000);
+pruneTimer.unref();
 const store = new Store(database);
 const workspace = new WorkspaceStore(
   database,
@@ -43,6 +112,8 @@ const config: PlatformConfig = {
   voiceKey: process.env.VOICE_API_KEY,
   voiceModel: process.env.VOICE_MODEL,
   voiceName: process.env.VOICE_NAME ?? 'marin',
+  voiceChatgptModel: process.env.VOICE_CHATGPT_MODEL || undefined,
+  voiceChatgptVoice: process.env.VOICE_CHATGPT_VOICE || undefined,
   slackChannel: process.env.SLACK_CHANNEL_NAME,
   slackTeam: process.env.SLACK_TEAM_ID,
   slackUsers: (process.env.SLACK_USER_IDS ?? '')
@@ -50,10 +121,27 @@ const config: PlatformConfig = {
     .map((value) => value.trim())
     .filter(Boolean),
   slackDotId: process.env.SLACK_DOT_ID || undefined,
-  runtimeUrl: `http://${host === '::1' ? '[::1]' : '127.0.0.1'}:${port}/api/copilotkit`,
-  ownerToken,
+  // The server's own runtime: loopback for wildcard binds, else the bound host.
+  runtimeUrl: `http://${wildcard ? '127.0.0.1' : host.includes(':') && !host.startsWith('[') ? `[${host}]` : host}:${port}/api/copilotkit`,
+  serviceToken: internalToken,
+  runTimeoutMs: runTimeoutMs(process.env.AGENT_RUN_TIMEOUT_SECONDS),
+  maxOutputTokens: maxOutputTokens(process.env.MODEL_MAX_OUTPUT_TOKENS),
+  reasoningEffort: reasoningEffort(process.env.MODEL_REASONING_EFFORT),
 };
-const platform = new Platform(store, workspace, config);
+const credentials = new ProviderCredentialStore(
+  database,
+  process.env.CREDENTIALS_SECRET,
+);
+const codex = new CodexAuth(credentials);
+const mcpStore = new McpStore(database, process.env.CREDENTIALS_SECRET);
+const platform = new Platform(
+  store,
+  workspace,
+  config,
+  ProviderRegistry.fromConfig(config, codex, process.env.OPENAI_CODEX_MODEL),
+  config.intelligenceKey ? undefined : new SqliteAgentRunner(database),
+  new McpService(mcpStore),
+);
 const researchConfig = {
   mode: 'live' as const,
   apiKey: config.apiKey,
@@ -63,6 +151,7 @@ const researchConfig = {
   parallelApiKey: config.parallelApiKey,
   browserUrl: config.browserUrl,
   browserSecret: config.browserSecret,
+  runTimeoutMs: config.runTimeoutMs,
 };
 const runner = new Runner(
   store,
@@ -74,7 +163,9 @@ const runner = new Runner(
         'This legacy task has no Intelligence conversation. Create a new scheduled task from a conversation.',
       );
     progress('Running this task in its Intelligence conversation.');
-    const text = await platform.turn(threadId, claim.prompt, signal);
+    const text = await platform.turn(threadId, claim.prompt, signal, {
+      opendotsSource: 'scheduled',
+    });
     return { text, sources: [], sample: false };
   },
 );
@@ -85,13 +176,11 @@ const app = createApp({
   store,
   runner,
   config: researchConfig,
-  ownerToken,
-  origin:
-    process.env.APP_ORIGIN ??
-    (process.env.NODE_ENV === 'development'
-      ? 'http://127.0.0.1:5173'
-      : undefined),
+  auth,
+  origin: appOrigin,
+  allowedHosts,
   platform,
+  codex,
 });
 app.use('*', async (c, next) => {
   c.header('X-Content-Type-Options', 'nosniff');
@@ -119,14 +208,32 @@ const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
 });
 const shutdown = createShutdown({
   stopRunner: () => runner.stop(),
-  stopPlatform: () => platform.stop(),
-  closeServer: () =>
-    new Promise<void>((resolve, reject) =>
-      server.close((error) => (error ? reject(error) : resolve())),
-    ),
+  stopPlatform: async () => {
+    clearInterval(pruneTimer);
+    codex.stop();
+    await platform.stop();
+  },
+  closeServer: () => closeHttpServer(server as Server),
   exit: (code) => process.exit(code),
   report: (operation, error) =>
     reportChannelFailure(operation, [safeFailure(error)]),
 });
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
+// A stray rejection is logged, not fatal: the request or job it belonged to
+// has already failed on its own path.
+process.on('unhandledRejection', (error) =>
+  reportChannelFailure('Unhandled promise rejection', [safeFailure(error)]),
+);
+// After an uncaught exception the process state is unknown: release leased
+// tasks so they requeue promptly, then exit for the container to restart.
+process.on('uncaughtException', (error) => {
+  // The stack is the only clue to a crash; it goes to the operator's own log.
+  console.error('Uncaught exception; exiting:', error.stack ?? error.name);
+  try {
+    runner.stop();
+  } catch {
+    // Leases expire and the tasks are retried after a restart.
+  }
+  process.exit(1);
+});

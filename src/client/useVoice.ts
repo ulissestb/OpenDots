@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, authHeaders } from './api';
+import { api } from './api';
+import {
+  delegationResultFrames,
+  parseDelegation,
+} from '../shared/voice-delegation';
 export function useVoice(
   threadId: string,
   onSaved: () => void,
@@ -26,6 +30,7 @@ export function useVoice(
         stream: MediaStream;
         audio: HTMLAudioElement;
         id?: string;
+        backend?: string;
         channel: RTCDataChannel;
         transcript: string[];
         timer?: ReturnType<typeof setTimeout>;
@@ -40,6 +45,9 @@ export function useVoice(
     if (!current) return;
     current.cancelled = true;
     current.stream.getTracks().forEach((track) => track.stop());
+    // ChatGPT-subscription sessions end on session.close, not an HTTP hangup.
+    if (current.backend === 'chatgpt' && current.channel.readyState === 'open')
+      current.channel.send(JSON.stringify({ type: 'session.close' }));
     current.channel.close();
     current.pc.close();
     current.audio.pause();
@@ -93,7 +101,8 @@ export function useVoice(
       if (current?.id && !ending.current)
         void fetch(`/api/voice/calls/${current.id}/end`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
           body: JSON.stringify({
             transcript: current.transcript.join('\n').slice(0, 20000),
             anchorMessageId: anchor.current,
@@ -124,6 +133,11 @@ export function useVoice(
   const start = async () => {
     if (session.current || connecting.current || ending.current) return;
     connecting.current = true;
+    // iOS only allows playback started inside the user gesture, so prime the
+    // element now, before any await; the remote stream is attached later.
+    const audio = new Audio();
+    audio.autoplay = true;
+    void audio.play().catch(() => {});
     const attempt = ++generation.current;
     setStatus('connecting');
     setError('');
@@ -141,8 +155,6 @@ export function useVoice(
         return;
       }
       const pc = new RTCPeerConnection();
-      const audio = new Audio();
-      audio.autoplay = true;
       const channel = pc.createDataChannel('oai-events');
       const current = {
         pc,
@@ -152,6 +164,7 @@ export function useVoice(
         transcript: [] as string[],
         cancelled: false,
         id: undefined as string | undefined,
+        backend: undefined as string | undefined,
         timer: undefined as ReturnType<typeof setTimeout> | undefined,
       };
       session.current = current;
@@ -203,6 +216,62 @@ export function useVoice(
         ) {
           setPhase('speaking');
           setCaption((text) => text + data.delta);
+        }
+        // ChatGPT-subscription calls use the frameless event names.
+        const item = data.item as { text?: unknown } | undefined;
+        if (
+          data.type === 'output_transcript.added' &&
+          typeof item?.text === 'string'
+        ) {
+          const text = item.text;
+          setPhase('speaking');
+          setCaption((caption) => caption + text);
+        }
+        if (
+          data.type === 'input_transcript.added' &&
+          typeof item?.text === 'string'
+        ) {
+          const text = item.text;
+          setPhase('listening');
+          setCaption('');
+          setUserCaption((caption) => caption + text);
+        }
+        // ChatGPT-subscription calls hand tasks to the Dot agent here; the
+        // result goes back to the voice model as delegation context.
+        const delegation = parseDelegation(data);
+        if (delegation && current.id) {
+          setPhase('thinking');
+          let output: string;
+          try {
+            const result = await api<{ text: string }>(
+              `/voice/calls/${current.id}/compute`,
+              'POST',
+              {
+                toolCallId: delegation.id,
+                request: delegation.request.slice(0, 4000),
+                transcript: current.transcript.join('\n').slice(-12000),
+              },
+            );
+            output = result.text;
+          } catch (e) {
+            output = `The task failed: ${e instanceof Error ? e.message : 'Unknown error'}`;
+          }
+          if (!current.cancelled && channel.readyState === 'open')
+            for (const frame of delegationResultFrames(delegation.id, output))
+              channel.send(frame);
+          return;
+        }
+        const turn = data.turn as
+          { role?: unknown; transcript?: unknown } | undefined;
+        if (data.type === 'turn.done' && typeof turn?.transcript === 'string') {
+          if (turn.role === 'user') {
+            current.transcript.push(`You: ${turn.transcript}`);
+            setUserCaption(turn.transcript);
+          }
+          if (turn.role === 'assistant') {
+            current.transcript.push(`Dot: ${turn.transcript}`);
+            setPhase('listening');
+          }
         }
         if (data.type === 'output_audio_buffer.stopped') setPhase('listening');
         if (data.type === 'response.created') {
@@ -271,12 +340,13 @@ export function useVoice(
       };
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      const response = await api<{ id: string; sdp: string }>(
+      const response = await api<{ id: string; sdp: string; backend: string }>(
         '/voice/calls',
         'POST',
         { threadId, sdp: offer.sdp },
       );
       current.id = response.id;
+      current.backend = response.backend;
       if (current.cancelled) {
         await api(`/voice/calls/${response.id}/end`, 'POST', {
           transcript: '',

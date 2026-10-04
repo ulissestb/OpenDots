@@ -6,6 +6,7 @@ import type {
   Action,
   Detail,
   Memory,
+  MemorySource,
   Result,
   Run,
   Settings,
@@ -19,7 +20,25 @@ const defaults: Settings = {
   paused: false,
   researchAllowed: true,
   memoryAllowed: true,
+  autoMemory: true,
 };
+export const memoryLimit = 500;
+// History kept per task; older runs and events are pruned after each run.
+export const runHistoryLimit = 200;
+export const eventHistoryLimit = 1000;
+// First retry of a failed recurring task; doubles per consecutive failure,
+// never later than the task's own interval.
+const retryBaseMs = 60_000;
+// Prompt budget: newest memories first, until either cap is reached.
+const promptMemoryCount = 100;
+const promptMemoryChars = 8000;
+type MemoryRow = Omit<Memory, 'updatedAt'> & { updatedAt: number | null };
+const memoryRow = (row: MemoryRow): Memory => ({
+  ...row,
+  dotId: row.dotId ?? null,
+  threadId: row.threadId ?? null,
+  updatedAt: row.updatedAt ?? row.createdAt,
+});
 export class Store {
   private db: DatabaseSync;
   constructor(path: string) {
@@ -34,6 +53,20 @@ export class Store {
       CREATE INDEX IF NOT EXISTS tasks_due ON tasks(status, nextRunAt);
       CREATE INDEX IF NOT EXISTS runs_task ON runs(taskId, startedAt);
       CREATE INDEX IF NOT EXISTS events_task ON events(taskId, id);`);
+    for (const [column, definition] of [
+      ['dotId', 'TEXT'],
+      ['source', "TEXT NOT NULL DEFAULT 'user'"],
+      ['threadId', 'TEXT'],
+      ['updatedAt', 'INTEGER'],
+    ]) {
+      if (
+        !this.db
+          .prepare('PRAGMA table_info(memories)')
+          .all()
+          .some((field) => field.name === column)
+      )
+        this.db.exec(`ALTER TABLE memories ADD COLUMN ${column} ${definition}`);
+    }
     this.db
       .prepare('INSERT OR IGNORE INTO settings VALUES (1, ?)')
       .run(JSON.stringify(defaults));
@@ -56,7 +89,7 @@ export class Store {
     const row = this.db
       .prepare('SELECT value FROM settings WHERE id=1')
       .get() as { value: string };
-    return JSON.parse(row.value) as Settings;
+    return { ...defaults, ...(JSON.parse(row.value) as Settings) };
   }
   updateSettings(patch: Partial<Settings>): Settings {
     return this.transaction(() => {
@@ -172,7 +205,7 @@ export class Store {
     const task = this.task(id);
     if (!task) return undefined;
     const next =
-      intervalSeconds && task.status === 'completed'
+      intervalSeconds && ['completed', 'failed'].includes(task.status)
         ? Date.now() + intervalSeconds * 1000
         : null;
     this.db
@@ -189,7 +222,7 @@ export class Store {
     );
     return this.task(id);
   }
-  claim(now = Date.now()): Claim | null {
+  claim(now = Date.now(), leaseMs = 180_000): Claim | null {
     return this.transaction(() => {
       const settings = this.settings();
       if (settings.paused || !settings.researchAllowed) return null;
@@ -204,7 +237,7 @@ export class Store {
         );
       const task = this.db
         .prepare(
-          "SELECT * FROM tasks WHERE status='queued' OR (status='completed' AND nextRunAt IS NOT NULL AND nextRunAt<=?) ORDER BY createdAt LIMIT 1",
+          "SELECT * FROM tasks WHERE status='queued' OR (status IN ('completed','failed') AND nextRunAt IS NOT NULL AND nextRunAt<=?) ORDER BY createdAt LIMIT 1",
         )
         .get(now) as unknown as Task | undefined;
       if (!task) return null;
@@ -213,7 +246,7 @@ export class Store {
         .prepare(
           "UPDATE tasks SET status='running', lease=?, leaseUntil=?, nextRunAt=NULL, error=NULL, updatedAt=? WHERE id=?",
         )
-        .run(lease, now + 180_000, now, task.id);
+        .run(lease, now + leaseMs, now, task.id);
       this.db
         .prepare(
           "INSERT INTO runs VALUES (?, ?, 'running', ?, NULL, NULL, NULL)",
@@ -252,6 +285,7 @@ export class Store {
           ? 'Fictional sample brief ready.'
           : 'Research brief ready.',
       );
+      this.prune(claim.id);
       return true;
     });
   }
@@ -260,37 +294,133 @@ export class Store {
       if (this.owns(claim)) this.invalidate(claim, 'queued', reason);
     });
   }
-  fail(claim: Claim, error: string) {
+  /**
+   * Records a failed run. A recurring task stays scheduled: it retries after
+   * a backoff that doubles per consecutive failure, capped at its interval.
+   */
+  fail(claim: Claim, error: string, now = Date.now()) {
     this.transaction(() => {
       if (!this.owns(claim)) return;
-      const now = Date.now();
+      const task = this.task(claim.id)!;
       this.db
         .prepare(
           "UPDATE runs SET status='failed', finishedAt=?, error=? WHERE id=?",
         )
         .run(now, error, claim.lease);
+      let nextRunAt: number | null = null;
+      if (task.intervalSeconds) {
+        const failures = this.consecutiveFailures(claim.id);
+        const backoff = retryBaseMs * 2 ** Math.min(failures - 1, 20);
+        nextRunAt = now + Math.min(task.intervalSeconds * 1000, backoff);
+      }
       this.db
         .prepare(
-          "UPDATE tasks SET status='failed', lease=NULL, leaseUntil=NULL, error=?, updatedAt=? WHERE id=?",
+          "UPDATE tasks SET status='failed', lease=NULL, leaseUntil=NULL, error=?, nextRunAt=?, updatedAt=? WHERE id=?",
         )
-        .run(error, now, claim.id);
+        .run(error, nextRunAt, now, claim.id);
       this.event(claim.id, claim.lease, error);
+      if (nextRunAt)
+        this.event(
+          claim.id,
+          claim.lease,
+          `Retrying in ${Math.round((nextRunAt - now) / 60_000)} minutes.`,
+        );
+      this.prune(claim.id);
     });
   }
-  memories(): Memory[] {
-    return this.db
-      .prepare('SELECT * FROM memories ORDER BY createdAt DESC')
-      .all() as unknown as Memory[];
+  private consecutiveFailures(taskId: string) {
+    const statuses = this.db
+      .prepare(
+        'SELECT status FROM runs WHERE taskId=? ORDER BY startedAt DESC, rowid DESC LIMIT 32',
+      )
+      .all(taskId) as { status: string }[];
+    const index = statuses.findIndex((run) => run.status !== 'failed');
+    return Math.max(1, index === -1 ? statuses.length : index);
   }
-  saveMemory(text: string, id: string = randomUUID()): Memory {
+  /** Keeps only the newest runs and events of a task. */
+  private prune(taskId: string) {
     this.db
       .prepare(
-        'INSERT INTO memories VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET text=excluded.text',
+        'DELETE FROM runs WHERE taskId=? AND id NOT IN (SELECT id FROM runs WHERE taskId=? ORDER BY startedAt DESC, rowid DESC LIMIT ?)',
       )
-      .run(id, text, Date.now());
-    return this.db
-      .prepare('SELECT * FROM memories WHERE id=?')
-      .get(id) as unknown as Memory;
+      .run(taskId, taskId, runHistoryLimit);
+    this.db
+      .prepare(
+        'DELETE FROM events WHERE taskId=? AND id NOT IN (SELECT id FROM events WHERE taskId=? ORDER BY id DESC LIMIT ?)',
+      )
+      .run(taskId, taskId, eventHistoryLimit);
+  }
+  memories(): Memory[] {
+    return (
+      this.db
+        .prepare(
+          'SELECT * FROM memories ORDER BY COALESCE(updatedAt, createdAt) DESC',
+        )
+        .all() as unknown as MemoryRow[]
+    ).map(memoryRow);
+  }
+  memory(id: string): Memory | undefined {
+    const row = this.db.prepare('SELECT * FROM memories WHERE id=?').get(id) as
+      MemoryRow | undefined;
+    return row && memoryRow(row);
+  }
+  /** Global memories plus those scoped to the Dot; never another Dot's. */
+  memoriesFor(dotId: string | null): Memory[] {
+    return this.memories().filter(
+      (memory) => memory.dotId === null || memory.dotId === dotId,
+    );
+  }
+  /** The newest visible memories that fit the prompt budget. */
+  promptMemories(dotId: string | null): Memory[] {
+    const selected: Memory[] = [];
+    let chars = 0;
+    for (const memory of this.memoriesFor(dotId)) {
+      if (selected.length >= promptMemoryCount) break;
+      chars += memory.text.length;
+      if (chars > promptMemoryChars) break;
+      selected.push(memory);
+    }
+    return selected;
+  }
+  saveMemory(
+    value: {
+      text: string;
+      dotId?: string | null;
+      source?: MemorySource;
+      threadId?: string | null;
+    },
+    id: string = randomUUID(),
+  ): Memory {
+    const existing = this.memory(id);
+    if (!existing && this.memories().length >= memoryLimit)
+      throw new Error(
+        `Memory is full (${memoryLimit} items). Delete some memories first.`,
+      );
+    const now = Date.now();
+    if (existing)
+      this.db
+        .prepare('UPDATE memories SET text=?, dotId=?, updatedAt=? WHERE id=?')
+        .run(
+          value.text,
+          value.dotId === undefined ? existing.dotId : value.dotId,
+          now,
+          id,
+        );
+    else
+      this.db
+        .prepare(
+          'INSERT INTO memories (id, text, createdAt, dotId, source, threadId, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        )
+        .run(
+          id,
+          value.text,
+          now,
+          value.dotId ?? null,
+          value.source ?? 'user',
+          value.threadId ?? null,
+          now,
+        );
+    return this.memory(id)!;
   }
   deleteMemory(id: string): boolean {
     return (

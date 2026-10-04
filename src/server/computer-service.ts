@@ -180,11 +180,19 @@ export class ComputerService {
       .parse(await this.supervisor('/computers', undefined, signal));
     return listing.computers.find((c) => c.botId === id);
   }
-  private async running(id: string, signal?: AbortSignal) {
+  private async running(id: string, signal?: AbortSignal, start = false) {
     const state = await this.existing(id, signal);
-    if (!state || state.status !== 'running')
-      throw new Error('Start this Dot’s computer first.');
-    return this.endpoint(id, state);
+    if (state?.status === 'running') return this.endpoint(id, state);
+    if (!start) throw new Error('Start this Dot’s computer first.');
+    // Agent work starts a stopped computer instead of failing the task.
+    const ensured = stateSchema.parse(
+      await this.supervisor(`/computers/${id}/ensure`, {}, signal),
+    );
+    if (ensured.url || ensured.port) return this.endpoint(id, ensured);
+    // A new container's ensure reply can omit its published port; the
+    // listing reports it.
+    const listed = await this.existing(id, signal);
+    return this.endpoint(id, listed?.status === 'running' ? listed : ensured);
   }
   async status(id: string): Promise<ComputerStatus> {
     this.requireDot(id);
@@ -341,7 +349,7 @@ export class ComputerService {
         }
       }, 50);
       try {
-        const url = await this.running(id, activeSignal);
+        const url = await this.running(id, activeSignal, actor === 'agent');
         this.allowed(id, kind, actor);
         activeSignal.throwIfAborted();
         const path = action

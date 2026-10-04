@@ -13,6 +13,8 @@
     "start": "node --env-file-if-exists=.env dist/server/server/index.js",
     "browser": "node --env-file-if-exists=.env --import tsx src/browser/index.ts",
     "browser:start": "node --env-file-if-exists=.env dist/server/browser/index.js",
+    "admin:reset-password": "node --env-file-if-exists=.env --import tsx src/server/reset-admin.ts",
+    "admin:reset-password:prod": "node --env-file-if-exists=.env dist/server/server/reset-admin.js",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src tests vite.config.ts",
@@ -50,6 +52,7 @@
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "rxjs": "^7.8.1",
     "zod": "^4.6.5"
   },

@@ -27,6 +27,7 @@ function fixture(ownerToken?: string) {
       runner: new Runner(store, config),
       config,
       platform,
+      auth: false,
       ownerToken,
     }),
   };

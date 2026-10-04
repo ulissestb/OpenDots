@@ -1,8 +1,11 @@
 import { pageRoutes } from './page-routes.js';
+import { skillRoutes } from './skill-routes.js';
+import { mcpRoutes } from './mcp-routes.js';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { Platform } from './platform.js';
 import { VoiceService } from './voice.js';
+import { modelIdSchema, providerIdSchema } from '../shared/providers.js';
 import {
   learningContainerIdSchema,
   validateLearningSettings,
@@ -15,13 +18,19 @@ const dotSchema = z
     memoryAllowed: z.boolean(),
     learningContainerId: learningContainerIdSchema.optional(),
     skillDeliveryEnabled: z.boolean().optional(),
+    delegationAllowed: z.boolean().optional(),
+    skillAuthoringAllowed: z.boolean().optional(),
     spaceIds: z.array(z.string().min(1)).min(1).max(100).optional(),
     spaceId: z.string().min(1).optional(),
+    provider: providerIdSchema.nullable().optional(),
+    model: modelIdSchema.nullable().optional(),
   })
   .strict();
 export function workspaceRoutes(platform: Platform, voice: VoiceService) {
   const app = new Hono();
   app.route('/', pageRoutes(platform));
+  app.route('/', skillRoutes(platform.workspace));
+  if (platform.mcp) app.route('/', mcpRoutes(platform.mcp, platform.workspace));
   app.get('/workspace', (c) =>
     c.json({
       spaces: platform.workspace.spaces(),
@@ -87,6 +96,12 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
         data.data.spaceIds,
         data.data.learningContainerId,
         data.data.skillDeliveryEnabled,
+        {
+          provider: data.data.provider,
+          model: data.data.model,
+          delegationAllowed: data.data.delegationAllowed,
+          skillAuthoringAllowed: data.data.skillAuthoringAllowed,
+        },
       ),
       201,
     );
@@ -137,6 +152,12 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
       201,
     );
   });
+  app.get('/conversations/:id/usage', (c) => {
+    const id = c.req.param('id');
+    if (!platform.workspace.conversations().some((thread) => thread.id === id))
+      return c.json({ error: 'Conversation not found.' }, 404);
+    return c.json(platform.usage(id));
+  });
   app.get('/conversations/:id/capture', (c) =>
     c.json(platform.workspace.capture(c.req.param('id'))),
   );
@@ -175,13 +196,22 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
         { error: 'A bounded compute request and tool call ID are required.' },
         400,
       );
-    return c.json({
-      text: await voice.compute(
-        c.req.param('id'),
-        data.data.toolCallId,
-        `${data.data.request}\n\nUntrusted current-call transcript for context:\n${data.data.transcript}`,
-      ),
-    });
+    try {
+      return c.json({
+        text: await voice.compute(
+          c.req.param('id'),
+          data.data.toolCallId,
+          `${data.data.request}\n\nUntrusted current-call transcript for context:\n${data.data.transcript}`,
+        ),
+      });
+    } catch (error) {
+      // The voice model relays this reason to the owner instead of a bare
+      // "server error"; the turn's own errors are already user-facing.
+      const message =
+        error instanceof Error ? error.message : 'The task failed.';
+      console.error('Voice task failed:', message);
+      return c.json({ error: message.slice(0, 500) }, 502);
+    }
   });
   app.post('/voice/calls/:id/end', async (c) => {
     const data = z

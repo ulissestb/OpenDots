@@ -15,7 +15,9 @@ export class ComputerStore {
       .get(id);
     return row
       ? JSON.parse(String(row.value))
-      : { enabled: false, browser: false, files: false, shell: false };
+      : // Dots get their isolated computer's tools without setup; the owner
+        // can still turn each capability off per Dot.
+        { enabled: true, browser: true, files: true, shell: true };
   }
   patch(id: string, patch: Partial<ComputerPermissions>) {
     const value = { ...this.permissions(id), ...patch };

@@ -84,7 +84,7 @@ export function pageTools(access: ReturnType<typeof pageAccess>) {
     defineTool({
       name: 'edit_space_page',
       description:
-        'Edit a page using its current expectedRevision. On conflict read the new version first. Preserve user content.',
+        'Edit a page using its current expectedRevision. For small changes send edits (exact find text that occurs once, plus its replacement) instead of rewriting the whole content; send content only to replace the full page. On conflict or a failed edit, read the page again first. Preserve user content.',
       parameters: pagePatch.extend({ id: z.string(), ...scope }),
       execute: async ({ id, spaceId, ...patch }) =>
         access.edit(id, patch, spaceId),

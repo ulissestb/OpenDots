@@ -1,10 +1,17 @@
 export type Status =
   'queued' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled';
+import type { ProviderId, ProviderStatus } from './providers.js';
 export interface Settings {
   name: string;
   paused: boolean;
   researchAllowed: boolean;
   memoryAllowed: boolean;
+  /** Extract durable memories from finished chat turns (one extra model call). */
+  autoMemory?: boolean;
+  /** Default model provider; absent or null picks the first ready one. */
+  modelProvider?: ProviderId | null;
+  /** Default model; absent or null uses the provider's default. */
+  model?: string | null;
 }
 export interface Task {
   id: string;
@@ -45,10 +52,17 @@ export interface TaskEvent {
   text: string;
   createdAt: number;
 }
+export type MemorySource = 'user' | 'agent' | 'auto';
 export interface Memory {
   id: string;
   text: string;
+  /** Null is a global memory; otherwise only this Dot sees it. */
+  dotId: string | null;
+  source: MemorySource;
+  /** Conversation the memory was learned from, if any. */
+  threadId: string | null;
   createdAt: number;
+  updatedAt: number;
 }
 export interface Detail {
   task: Task;
@@ -81,6 +95,13 @@ export interface Dot {
   createdAt: number;
   learningContainerId?: string | null;
   skillDeliveryEnabled?: boolean;
+  /** May hand tasks to other Dots, which run under their own permissions. */
+  delegationAllowed: boolean;
+  /** May create and update its own skills. */
+  skillAuthoringAllowed: boolean;
+  /** Overrides the workspace default provider; null uses the default. */
+  provider?: ProviderId | null;
+  model?: string | null;
 }
 export interface Conversation {
   id: string;
@@ -108,6 +129,8 @@ export interface SetupStatus {
   voice: boolean;
   slack: string;
   missing: string[];
+  providers?: ProviderStatus[];
+  defaultProvider?: { provider: ProviderId | null; model: string | null };
 }
 export interface WorkspaceState {
   spaces: Space[];

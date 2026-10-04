@@ -58,7 +58,7 @@ _Open a Space, navigate to its launch brief, ask Scout about the saved page, and
 
 ### Specialist Dots
 
-Give each Dot a name, role, instructions, and permitted tools. A researcher can investigate a topic; a writer can turn findings into a draft. Inspect their work and control what they can do.
+Give each Dot a name, role, instructions, and permitted tools. A researcher can investigate a topic; a writer can turn findings into a draft. Dots can also delegate on their own: when another Dot suits part of a request better, a Dot hands it that sub-task, waits for the result, and folds it into its answer. Each delegation runs in its own conversation (titled "Dot A → Dot B") that you can open and inspect. Control what each Dot can do, including whether it may delegate.
 
 ### Dot computers
 
@@ -86,7 +86,7 @@ Ask a Dot to show a draft before saving it. A CopilotKit human-in-the-loop card 
 
 A continuous conversation keeps the Dot's avatar and status above the messages, with text and call controls close at hand. Work updates, source links, and call receipts appear in the timeline; a side panel shows results or the agent's computer.
 
-Calls pair realtime speech with a separate compute agent, so the conversation can continue while longer work runs. Both use the same conversation context and tool permissions. The call screen includes a live timer, separate user and Dot captions, microphone mute, speaker mute, and a minimized view for continuing in chat. Voice needs separate provider configuration.
+Calls pair realtime speech with a separate compute agent, so the conversation can continue while longer work runs. Both use the same conversation context and tool permissions. The call screen includes a live timer, separate user and Dot captions, microphone mute, speaker mute, and a minimized view for continuing in chat. Calls run on the ChatGPT subscription sign-in (unofficial) or on a Realtime API key.
 
 <div align="center">
 
@@ -160,31 +160,33 @@ cp .env.example .env
 npm run dev
 ```
 
-Open **http://127.0.0.1:5173**. You can create Spaces, write pages, and configure Dots before connecting services. Add your conversation and model settings to `.env` to start chatting.
+Open **http://127.0.0.1:5173** and sign in as `admin` / `admin`; you will be asked to choose a new password. You can create Spaces, write pages, and configure Dots before connecting services. Add your conversation and model settings to `.env` to start chatting.
 
 See [Setup](docs/SETUP.md) for configuration, Slack, calls, the browser service, and Docker.
 
 ## Features
 
-| Area                       | Included                                                                                                                                |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| Spaces and Specialist Dots | Saved names, role instructions, and per-Dot research and memory permissions                                                             |
-| Pages                      | Searchable library, visual editor, slash commands, autosave, and revision checks                                                        |
-| Conversations              | React SDK chat and Threads integration, page-specific conversations, and source links                                                   |
-| Slack                      | Managed Channels SDK declaration with workspace and user allowlists                                                                     |
-| Calls                      | WebRTC speech, delegated compute, bounded sessions, hangup, and timeline receipts                                                       |
-| Background work            | Scheduled server-side turns in their original conversation, with pause and retry controls                                               |
-| Browser                    | Separate read-only public-page service with page capture and navigation limits                                                          |
-| Dot computers              | Per-Dot browser profiles, files, shell, takeover, permissions, and action records through OpenBot                                       |
-| Memory                     | User-managed preferences that permitted Dots can use                                                                                    |
-| Automatic Learning         | Per-Dot Learning containers, conversation evidence routing, and published-skill delivery; see [setup](docs/SETUP.md#automatic-learning) |
-| Deployment                 | Local Node setup and separate application/browser containers                                                                            |
+| Area                       | Included                                                                                                                                                              |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Spaces and Specialist Dots | Saved names, role instructions, per-Dot research, memory, and delegation permissions, and autonomous Dot-to-Dot delegation                                            |
+| Sign-in and models         | Admin sign-in with forced first password change; OpenAI-compatible API key or ChatGPT subscription sign-in, with per-Dot model choice                                 |
+| Pages                      | Searchable library, visual editor, slash commands, autosave, and revision checks                                                                                      |
+| Conversations              | React SDK chat and Threads integration, page-specific conversations, and source links                                                                                 |
+| Slack                      | Managed Channels SDK declaration with workspace and user allowlists                                                                                                   |
+| Calls                      | WebRTC realtime speech on a ChatGPT sign-in or API key, delegated compute, hangup, and timeline receipts                                                              |
+| Background work            | Scheduled server-side turns in their original conversation, with pause and retry controls                                                                             |
+| Browser                    | Separate read-only public-page service with page capture and navigation limits                                                                                        |
+| Dot computers              | Per-Dot browser profiles, files, shell, takeover, permissions, and action records through OpenBot                                                                     |
+| Skills and MCP             | Owner-managed Agent Skills (`SKILL.md`, loaded on demand) and remote MCP servers with reviewed tool lists, per-Dot; see [setup](docs/SETUP.md#skills-and-mcp-servers) |
+| Memory                     | Global or per-Dot memories added by you, saved by Dots on request, or learned automatically; see [setup](docs/SETUP.md#memory)                                        |
+| Automatic Learning         | Per-Dot Learning containers, conversation evidence routing, and published-skill delivery; see [setup](docs/SETUP.md#automatic-learning)                               |
+| Deployment                 | Local Node setup and separate application/browser containers                                                                                                          |
 
 Local checks cover setup, persistence, permissions, SDK failure handling, and browser isolation. Automated tests use service fixtures. **Live Intelligence, model responses, and page-context chat were verified on September 29, 2026.** Live OpenBot computer browsing, file creation, shell verification, and file persistence across stop/start were also verified locally. Live Realtime speech, call controls, and receipt persistence were verified locally on September 30, 2026. Slack and spoken compute delegation still need connected-service verification. See [recording notes](docs/demos/README.md) for the demonstrated flows and limits.
 
 Automatic Learning routing and skill delivery are configured locally. Cloud schedules, eligible-thread counts, and published-skill delivery still need connected-service verification. Skills require review and publication in Intelligence; existing conversations without a container are not enrolled retroactively.
 
-This is a single-owner starting point. Shared editing, invitations, file uploads, and interactive page embeds are not included. Schedules are recurring instructions, not a complete goal or event-trigger system. Specialist Dots have separate roles and conversations; multi-Dot group conversations and automatic delegation are further work.
+This is a single-owner starting point. Shared editing, invitations, file uploads, and interactive page embeds are not included. Schedules are recurring instructions, not a complete goal or event-trigger system. Specialist Dots have separate roles and conversations and can delegate sub-tasks to each other within one turn; multi-Dot group conversations and background (fire-and-forget) delegation are further work.
 
 ### Extending the template
 

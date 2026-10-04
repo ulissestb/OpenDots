@@ -1,6 +1,7 @@
 export function completion(
   delta: Record<string, unknown>,
   finishReason = 'stop',
+  usage?: Record<string, unknown>,
 ) {
   const chunks = [
     {
@@ -17,6 +18,19 @@ export function completion(
       model: 'custom-model',
       choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
     },
+    // With stream_options.include_usage, usage arrives in a final chunk.
+    ...(usage
+      ? [
+          {
+            id: 'completion',
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: 'custom-model',
+            choices: [],
+            usage,
+          },
+        ]
+      : []),
   ];
   return new Response(
     chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join('') +

@@ -1358,6 +1358,11 @@ h3 {
   padding: 14px;
   margin: 22px 0;
 }
+.config-note .device-code {
+  font-size: 18px;
+  letter-spacing: 2px;
+  color: inherit;
+}
 .config-note strong {
   font-size: 11px;
   font-weight: 500;
@@ -1599,7 +1604,7 @@ h3 {
     display: none;
   }
   .mode-badge {
-    font-size: 7px;
+    font-size: 11px;
     padding: 5px 6px;
     letter-spacing: 0.7px;
   }
@@ -1620,7 +1625,7 @@ h3 {
     z-index: 1;
   }
   .hero .eyebrow {
-    font-size: 7px;
+    font-size: 11px;
     letter-spacing: 1.4px;
   }
   .hero h1 {
@@ -1630,13 +1635,13 @@ h3 {
     line-height: 1.2;
   }
   .hero-copy > p {
-    font-size: 10px;
+    font-size: 11px;
     max-width: 210px;
     line-height: 1.8;
     margin-top: 17px;
   }
   .ready-pill {
-    font-size: 8px;
+    font-size: 11px;
     padding: 5px 7px;
   }
   .hero-mascot {
@@ -1675,7 +1680,7 @@ h3 {
     min-height: 68px;
   }
   .composer-bottom > span {
-    font-size: 8px;
+    font-size: 11px;
     max-width: 210px;
   }
   .composer-bottom > span svg {
@@ -1683,7 +1688,7 @@ h3 {
     flex-shrink: 0;
   }
   .composer-footnote {
-    font-size: 7px;
+    font-size: 11px;
     line-height: 1.8;
     padding: 0 9px;
     margin-top: 8px;
@@ -1709,11 +1714,11 @@ h3 {
     margin-bottom: 12px;
   }
   .suggestion strong {
-    font-size: 10px;
+    font-size: 11px;
     line-height: 1.6;
   }
   .suggestion p {
-    font-size: 8px;
+    font-size: 11px;
     line-height: 1.6;
     margin-top: 6px;
   }
@@ -1737,12 +1742,12 @@ h3 {
     width: 17px;
   }
   .empty-activity strong {
-    font-size: 9px;
+    font-size: 11px;
     line-height: 1.7;
     display: block;
   }
   .empty-activity p {
-    font-size: 8px;
+    font-size: 11px;
     line-height: 1.8;
     margin-top: 3px;
   }
@@ -1750,7 +1755,7 @@ h3 {
     display: none;
   }
   .main-footer {
-    font-size: 7px;
+    font-size: 11px;
     margin-top: 29px;
   }
   .page-heading {
@@ -1777,7 +1782,7 @@ h3 {
     font-size: 11px;
   }
   .task-row .status {
-    font-size: 8px;
+    font-size: 11px;
     padding: 4px 5px;
   }
   .task-row > svg {
@@ -1788,7 +1793,7 @@ h3 {
   }
   .notice {
     padding: 12px 22px;
-    font-size: 10px;
+    font-size: 11px;
   }
   .conversation {
     padding: 23px 22px 38px;
@@ -1803,7 +1808,7 @@ h3 {
     gap: 6px;
   }
   .task-controls button {
-    font-size: 9px;
+    font-size: 11px;
   }
   .task-layout {
     min-height: calc(100vh - 72px);
@@ -1879,7 +1884,7 @@ h3 {
     font-size: 11px;
   }
   .suggestion p {
-    font-size: 9px;
+    font-size: 11px;
     margin-top: 3px;
   }
   .suggestion > svg {
@@ -1888,7 +1893,7 @@ h3 {
     top: 27px;
   }
   .composer-footnote {
-    font-size: 8px;
+    font-size: 11px;
   }
   .hero {
     padding-right: 0;
@@ -2158,6 +2163,18 @@ h3 {
   font-size: 11px;
   color: #5c665e;
 }
+.chat-persona .chat-usage {
+  max-width: 100%;
+  overflow: hidden;
+  color: #7a8279;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-persona > div:has(.chat-usage) {
+  min-width: 0;
+}
 .chat-persona .chat-persona-actions {
   flex-direction: row;
   margin-left: auto;
@@ -2175,13 +2192,13 @@ h3 {
   gap: 22px;
 }
 .chat-bubble {
-  font-size: 12px;
-  line-height: 1.95;
+  font-size: 14px;
+  line-height: 1.7;
   overflow-wrap: anywhere;
 }
 .chat-bubble p {
   margin: 0 0 12px;
-  line-height: 1.95;
+  line-height: inherit;
 }
 .chat-bubble p:last-child {
   margin: 0;
@@ -2216,10 +2233,54 @@ h3 {
   text-underline-offset: 3px;
 }
 .chat-bubble pre {
-  white-space: pre-wrap;
+  overflow-x: auto;
+  white-space: pre;
+  max-width: 100%;
   background: #efeff2;
   padding: 13px;
   border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.chat-bubble pre code {
+  white-space: pre;
+  overflow-wrap: normal;
+  background: none;
+  padding: 0;
+  font-size: inherit;
+}
+.chat-bubble :not(pre) > code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.88em;
+  background: #efeff2;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.chat-bubble.user :not(pre) > code {
+  background: #ffffff26;
+}
+.chat-bubble table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 0 0 12px;
+}
+.chat-bubble th,
+.chat-bubble td {
+  border: 1px solid #e3e4e9;
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.chat-bubble th {
+  background: #f5f5f7;
+  font-weight: 600;
+}
+.chat-bubble blockquote {
+  margin: 0 0 12px;
+  padding-left: 12px;
+  border-left: 3px solid #e3e4e9;
 }
 .chat-welcome {
   text-align: center;
@@ -2271,7 +2332,9 @@ h3 {
   resize: none;
   font-size: 12px;
   min-height: 43px;
-  max-height: 120px;
+  max-height: 200px;
+  overflow-y: auto;
+  field-sizing: content;
 }
 .chat-compose-row textarea::placeholder {
   color: #b1b3be;
@@ -2461,7 +2524,7 @@ h3 {
   }
   .empty-chat-persona p {
     max-width: 265px;
-    font-size: 9px;
+    font-size: 11px;
   }
   .starter-copy h1 {
     font-size: 33px;
@@ -2475,11 +2538,11 @@ h3 {
     padding: 6px;
   }
   .setup-card p {
-    font-size: 9px;
+    font-size: 11px;
     overflow-wrap: anywhere;
   }
   .setup-card code {
-    font-size: 8px;
+    font-size: 11px;
   }
   .new-conversation .composer {
     margin-top: 20px;
@@ -2490,12 +2553,12 @@ h3 {
     gap: 7px;
   }
   .starter-suggestions button {
-    font-size: 10px;
+    font-size: 11px;
     justify-content: space-between;
     padding: 10px 13px;
   }
   .connection-note {
-    font-size: 8px;
+    font-size: 11px;
     margin-top: 22px;
     flex-wrap: wrap;
   }
@@ -2521,7 +2584,7 @@ h3 {
     gap: 20px;
   }
   .chat-bubble {
-    font-size: 12px;
+    font-size: 14px;
   }
   .chat-bubble.user {
     max-width: 87%;
@@ -2544,7 +2607,7 @@ h3 {
     padding-left: 53px;
   }
   .template-app .breadcrumbs {
-    font-size: 10px;
+    font-size: 11px;
   }
   .template-app .top-actions {
     gap: 7px;
@@ -2557,7 +2620,7 @@ h3 {
     min-height: 530px;
   }
   .voice-strip {
-    font-size: 9px;
+    font-size: 11px;
     flex-wrap: wrap;
   }
   .spaces-nav {
@@ -3992,4 +4055,360 @@ h3 {
 .call-caption .call-user-caption {
   font-size: 14px;
   color: #c9e8dd;
+}
+.memory-tool {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  margin: 6px 0;
+  padding: 6px 12px;
+  width: fit-content;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--lavender);
+  color: var(--ink);
+  font-size: 13px;
+}
+.memory-tool span {
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.memory-tool.failed {
+  color: var(--muted);
+}
+
+/* Session expired: sign-in floats over the still-mounted workspace. */
+.session-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  overflow-y: auto;
+  background: #f8f7f4f2;
+  backdrop-filter: blur(3px);
+}
+
+@media (max-width: 700px) {
+  /* 16px stops iOS Safari from zooming into focused fields. */
+  input:not([type='checkbox']):not([type='radio']):not([type='range']),
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+  .template-app .chat-persona {
+    min-height: 0;
+    padding: 0 0 8px;
+    justify-content: flex-start;
+    flex-wrap: nowrap;
+    gap: 8px;
+  }
+  .template-app .chat-persona > .mascot {
+    width: 36px;
+    height: 36px;
+  }
+  .template-app .chat-persona .chat-persona-actions {
+    position: static;
+    margin-left: auto;
+  }
+  .template-app .call-receipt,
+  .template-app .call-receipt small,
+  .template-app .thinking,
+  .template-app .chat-error button,
+  .template-app .voice-strip,
+  .template-app .voice-strip button,
+  .template-app .empty-chat-persona .text-button,
+  .template-app .starter-suggestions button,
+  .template-app .connection-note,
+  .template-app .connection-note .text-button,
+  .template-app .setup-card code,
+  .template-app .thread-list .nav-item {
+    font-size: 11px;
+  }
+}
+
+/* Skills & MCP */
+.integrations section {
+  margin-bottom: 40px;
+}
+.integration-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+.integration-heading h2 {
+  font-size: 18px;
+  margin: 0 0 6px;
+}
+.integration-heading p {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0;
+  max-width: 560px;
+  line-height: 1.6;
+}
+.integration-heading .primary {
+  flex-shrink: 0;
+}
+.help-note {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--muted);
+  background: var(--lavender);
+  border-radius: 8px;
+  padding: 9px 12px;
+  margin: 0 0 14px;
+}
+.integration-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.integration-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px 18px 12px;
+}
+.integration-card-top {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-width: 0;
+}
+.integration-card-top > svg {
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.integration-card-top strong {
+  font-size: 13px;
+  font-weight: 550;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-right: auto;
+}
+.integration-card > p {
+  font-size: 12px;
+  line-height: 1.6;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.integration-card > p.integration-url {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+.integration-card-bottom {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+}
+.integration-card-bottom small {
+  font-size: 10px;
+  color: var(--muted);
+  margin-right: auto;
+  overflow-wrap: anywhere;
+}
+.status.wrap {
+  font-size: 10px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+  max-width: 100%;
+}
+.status.wrap > span {
+  flex-shrink: 0;
+}
+.integration-empty {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--muted);
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  padding: 18px;
+}
+.integration-empty p {
+  font-size: 12px;
+  margin: 0;
+}
+.modal.wide {
+  max-width: 640px;
+}
+.modal textarea.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.modal .field-help {
+  margin: 6px 0 0;
+}
+.import-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 14px 0 6px;
+}
+.file-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 13px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #fff;
+  font-size: 12px;
+  cursor: pointer;
+}
+.file-button:hover {
+  background: #f4f4f9;
+}
+.file-button:focus-within {
+  outline: 3px solid #b8c4fa;
+  outline-offset: 3px;
+}
+.file-button input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  overflow: hidden;
+}
+.skipped-files {
+  font-size: 11px;
+  color: var(--muted);
+  margin: 8px 0;
+}
+.skipped-files summary {
+  cursor: pointer;
+}
+.skipped-files ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  max-height: 160px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+.file-row {
+  border-top: 1px solid var(--line);
+  padding: 10px 0;
+}
+.file-row-head,
+.header-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.file-row-head input,
+.header-row input {
+  min-width: 0;
+  padding: 9px 10px;
+}
+.space-access-fields > button {
+  font-size: 12px;
+  margin-top: 4px;
+}
+.size-meter {
+  font-size: 10px;
+  text-align: right;
+  margin: 4px 0 0;
+}
+.size-meter.over {
+  color: #b17d73;
+}
+.permission-row.compact {
+  margin: 10px 0;
+  align-items: flex-start;
+}
+.permission-row.compact > span {
+  font-size: 12px;
+}
+.dot-choices {
+  padding-left: 26px;
+}
+.mcp-test-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 4px 0 8px;
+}
+.mcp-test-row button {
+  font-size: 12px;
+}
+.tool-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 320px;
+  overflow: auto;
+}
+.tool-list li {
+  border-top: 1px solid var(--line);
+}
+.tool-list strong {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+}
+.tool-badge {
+  display: inline-block;
+  font-size: 9px;
+  padding: 2px 6px;
+  margin-left: 6px;
+  border-radius: 5px;
+  background: #eff4ee;
+  color: #6c8a70;
+  vertical-align: 1px;
+}
+.tool-badge.danger {
+  background: #faf0ed;
+  color: #b17d73;
+}
+@media (max-width: 920px) {
+  .integration-list {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 700px) {
+  .integration-heading {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+  .integration-heading .primary {
+    width: 100%;
+  }
+  .integration-card-bottom small,
+  .integration-heading p,
+  .help-note,
+  .skipped-files,
+  .size-meter,
+  .status.wrap,
+  .tool-badge {
+    font-size: 11px;
+  }
+  .integration-card-bottom .icon-button {
+    padding: 10px;
+  }
+  .file-button {
+    flex: 1 1 140px;
+    justify-content: center;
+  }
 }

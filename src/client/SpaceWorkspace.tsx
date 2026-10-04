@@ -51,10 +51,17 @@ export function SpaceWorkspace({
       }
     };
     void load();
-    const timer = setInterval(() => void load(), 3000);
+    const timer = setInterval(() => {
+      if (!document.hidden) void load();
+    }, 3000);
+    const visible = () => {
+      if (!document.hidden) void load();
+    };
+    document.addEventListener('visibilitychange', visible);
     return () => {
       active = false;
       clearInterval(timer);
+      document.removeEventListener('visibilitychange', visible);
     };
   }, [space.id]);
   const page = pages.find((item) => item.id === pageId);

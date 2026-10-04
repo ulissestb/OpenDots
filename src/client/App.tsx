@@ -1,7 +1,13 @@
 import { openPageLink } from './page-navigation';
 import { SpaceNav } from './SpaceNav';
-import { SpaceWorkspace } from './SpaceWorkspace';
-import { useCallback, useEffect, useState, useRef } from 'react';
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useState,
+  useRef,
+} from 'react';
 import { CopilotKitProvider } from '@copilotkit/react-core/v2';
 import {
   ArrowUp,
@@ -10,6 +16,8 @@ import {
   Clock3,
   Code2,
   Folder,
+  KeyRound,
+  LogOut,
   Menu,
   MessageCircle,
   Monitor,
@@ -18,6 +26,7 @@ import {
   PanelLeft,
   Play,
   Plus,
+  Puzzle,
   Search,
   Settings2,
   Trash2,
@@ -31,23 +40,46 @@ import type {
   State,
   WorkspaceState,
 } from '../shared/types';
-import { api, ApiError, authHeaders, setToken } from './api';
+import { api, ApiError } from './api';
+import type { AuthUser } from '../shared/auth';
+import { ChangePasswordScreen, LoginScreen } from './Login';
 import { Mascot } from './Mascot';
 import { Chat } from './Chat';
 import { ThreadList } from './ThreadList';
-import { ResultPane } from './ResultPane';
 import { TaskRow } from './TaskPresentation';
 import { TaskActions } from './TaskActions';
-import { WorkspaceDialog, type Dialog } from './WorkspaceDialog';
+import type { Dialog } from './WorkspaceDialog';
+// Heavy, non-initial surfaces load on demand (TipTap lives behind Spaces).
+const SpaceWorkspace = lazy(() =>
+  import('./SpaceWorkspace').then((m) => ({ default: m.SpaceWorkspace })),
+);
+const WorkspaceDialog = lazy(() =>
+  import('./WorkspaceDialog').then((m) => ({ default: m.WorkspaceDialog })),
+);
+const SkillsMcpView = lazy(() =>
+  import('./SkillsMcpView').then((m) => ({ default: m.SkillsMcpView })),
+);
+const ResultPane = lazy(() =>
+  import('./ResultPane').then((m) => ({ default: m.ResultPane })),
+);
+const paneFallback = (
+  <aside className="result-pane" aria-busy="true">
+    <div className="pane-empty">
+      <p>Loading…</p>
+    </div>
+  </aside>
+);
 
 export function App() {
   const [state, setState] = useState<State>();
   const [workspace, setWorkspace] = useState<WorkspaceState>();
   const [selectedDot, setSelectedDot] = useState('');
   const [selectedThread, setSelectedThread] = useState<string>();
-  const [view, rawSetView] = useState<'chat' | 'tasks' | 'memories' | 'space'>(
-    'chat',
-  );
+  // A #/threads/:id link, resolved once the workspace lists that conversation.
+  const [routeThread, setRouteThread] = useState<string>();
+  const [view, rawSetView] = useState<
+    'chat' | 'tasks' | 'memories' | 'skills' | 'space'
+  >('chat');
   const dirtyPage = useRef(false);
   const [spaceId, setSpaceId] = useState('');
   const [pageId, setPageId] = useState<string>();
@@ -65,6 +97,11 @@ export function App() {
   useEffect(() => {
     let acceptedHash = location.hash;
     const navigate = () => {
+      const threadMatch = location.hash.match(/^#\/threads\/([^/]+)$/);
+      if (threadMatch) {
+        setRouteThread(threadMatch[1]);
+        return;
+      }
       const match = location.hash.match(
         /^#\/spaces\/([^/]+)(?:\/pages\/([^/]+))?$/,
       );
@@ -93,8 +130,11 @@ export function App() {
   };
 
   const [error, setError] = useState('');
-  const [auth, setAuth] = useState('');
-  const [needsAuth, setNeedsAuth] = useState(false);
+  const [authState, setAuthState] = useState<
+    'loading' | 'anonymous' | 'must_change' | 'ready'
+  >('loading');
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [changingPassword, setChangingPassword] = useState(false);
   const [dialog, setDialog] = useState<Dialog>();
   const [mobile, setMobile] = useState(false);
   const [navCollapsed, setNavCollapsed] = useState(false);
@@ -105,34 +145,104 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [search, setSearch] = useState('');
   const [taskDetail, setTaskDetail] = useState<Detail>();
+  const refreshSeq = useRef(0);
+  const refreshError = useRef('');
   const refresh = useCallback(async () => {
+    // Only the newest request may update state; older replies are stale.
+    const seq = ++refreshSeq.current;
     try {
       const [s, w] = await Promise.all([
         api<State>('/state'),
         api<WorkspaceState>('/workspace'),
       ]);
+      if (seq !== refreshSeq.current) return;
       setState(s);
       setWorkspace(w);
-      setNeedsAuth(false);
       setSelectedDot((previous) => previous || w.dots[0]?.id || '');
+      // Clear a connection error this poll raised, but keep other errors.
+      const stale = refreshError.current;
+      refreshError.current = '';
+      if (stale) setError((current) => (current === stale ? '' : current));
     } catch (e) {
-      if (e instanceof ApiError && e.status === 401) setNeedsAuth(true);
-      else
-        setError(
-          e instanceof Error ? e.message : 'Could not connect to the server.',
-        );
+      if (seq !== refreshSeq.current) return;
+      if (e instanceof ApiError && e.status === 401) {
+        // Keep the workspace mounted so unsaved drafts survive re-sign-in.
+        setAuthState('anonymous');
+      } else if (e instanceof ApiError && e.code === 'password_change_required')
+        setAuthState('must_change');
+      else {
+        const message =
+          e instanceof Error ? e.message : 'Could not connect to the server.';
+        refreshError.current = message;
+        setError(message);
+      }
     }
   }, []);
+  const signedIn = useCallback((next: AuthUser | null) => {
+    setUser(next);
+    setError('');
+    setAuthState(next?.mustChangePassword ? 'must_change' : 'ready');
+  }, []);
   useEffect(() => {
+    if (authState !== 'loading') return;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // Keep retrying until the API server answers, e.g. while it is starting.
+    const check = () =>
+      api<{ user: AuthUser | null }>('/auth/me')
+        .then(({ user }) => {
+          if (active) signedIn(user);
+        })
+        .catch((e) => {
+          if (!active) return;
+          if (e instanceof ApiError && e.status === 401)
+            return setAuthState('anonymous');
+          setError(
+            e instanceof ApiError && e.status < 500
+              ? e.message
+              : 'Could not reach the OpenDots server. Retrying…',
+          );
+          timer = setTimeout(check, 3000);
+        });
+    void check();
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [authState, signedIn]);
+  useEffect(() => {
+    if (authState !== 'ready') return;
     void refresh();
-    const timer = setInterval(() => void refresh(), 3000);
-    return () => clearInterval(timer);
-  }, [refresh]);
+    const timer = setInterval(() => {
+      if (!document.hidden) void refresh();
+    }, 3000);
+    const visible = () => {
+      if (!document.hidden) void refresh();
+    };
+    document.addEventListener('visibilitychange', visible);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', visible);
+    };
+  }, [refresh, authState]);
+  const signOut = async () => {
+    if (dirtyPage.current && !window.confirm('Leave your unsaved page draft?'))
+      return;
+    dirtyPage.current = false;
+    await api('/auth/logout', 'POST', {}).catch(() => {});
+    setUser(null);
+    setState(undefined);
+    setWorkspace(undefined);
+    setChangingPassword(false);
+    setAuthState('anonymous');
+  };
+  const showCapture = authState === 'ready' && pane;
   useEffect(() => {
     setCapture(undefined);
-    if (!selectedThread) return;
+    if (!selectedThread || !showCapture) return;
     let active = true;
-    const load = () =>
+    const load = () => {
+      if (document.hidden) return;
       void api<Result | null>(`/conversations/${selectedThread}/capture`)
         .then((result) => {
           if (active) setCapture(result ?? undefined);
@@ -140,13 +250,16 @@ export function App() {
         .catch((e) => {
           if (active) setError(e.message);
         });
+    };
     load();
     const timer = setInterval(load, 3000);
+    document.addEventListener('visibilitychange', load);
     return () => {
       active = false;
       clearInterval(timer);
+      document.removeEventListener('visibilitychange', load);
     };
-  }, [selectedThread]);
+  }, [selectedThread, showCapture]);
   const mutate = async (path: string, method: string, body?: unknown) => {
     setError('');
     try {
@@ -167,6 +280,23 @@ export function App() {
     (item) => item.id === selectedThread && item.dotId === dot?.id,
   );
   const configured = !!workspace && workspace.setup.missing.length === 0;
+  useEffect(() => {
+    if (!routeThread || !workspace) return;
+    const conversation = workspace.conversations.find(
+      (item) => item.id === routeThread,
+    );
+    // A just-delegated conversation appears with the next workspace refresh.
+    if (!conversation) return;
+    setRouteThread(undefined);
+    history.replaceState(null, '', location.pathname + location.search);
+    if (dirtyPage.current && !window.confirm('Leave your unsaved page draft?'))
+      return;
+    dirtyPage.current = false;
+    setSelectedDot(conversation.dotId);
+    setSelectedThread(conversation.id);
+    setView('chat');
+    setMobile(false);
+  }, [routeThread, workspace]);
   const chooseDot = (next: Dot) => {
     setSelectedDot(next.id);
     setSelectedThread(
@@ -199,48 +329,24 @@ export function App() {
       setBusy(false);
     }
   };
-  if (needsAuth)
+  const sessionExpired = authState === 'anonymous' && !!state && !!workspace;
+  if (authState === 'anonymous' && !sessionExpired)
+    return <LoginScreen onSignedIn={signedIn} />;
+  if (authState === 'must_change' || changingPassword)
     return (
-      <main className="unlock">
-        <Mascot />
-        <h1>Your own little corner.</h1>
-        <p>
-          Enter the owner access token configured on this template’s server.
-        </p>
-        <form
-          onSubmit={async (e) => {
-            e.preventDefault();
-            setToken(auth);
-            try {
-              await api('/state');
-              setError('');
-              await refresh();
-            } catch (err) {
-              setError(
-                err instanceof Error
-                  ? err.message
-                  : 'Access token was not accepted.',
-              );
-            }
-          }}
-        >
-          <input
-            type="password"
-            aria-label="Owner access token"
-            autoComplete="current-password"
-            value={auth}
-            onChange={(e) => setAuth(e.target.value)}
-            required
-          />
-          <button className="primary">Unlock OpenDots</button>
-        </form>
-        {error && (
-          <p className="chat-error" role="alert">
-            {error}
-          </p>
-        )}
-        <p className="muted">The token stays in this tab’s session storage.</p>
-      </main>
+      <ChangePasswordScreen
+        username={user?.username ?? 'admin'}
+        forced={authState === 'must_change'}
+        onChanged={(next) => {
+          setChangingPassword(false);
+          signedIn(next);
+        }}
+        onCancel={() =>
+          authState === 'must_change'
+            ? void signOut()
+            : setChangingPassword(false)
+        }
+      />
     );
   if (!state || !workspace || !dot)
     return (
@@ -256,7 +362,10 @@ export function App() {
       </main>
     );
   const content = (
-    <div className={`app template-app ${navCollapsed ? 'nav-collapsed' : ''}`}>
+    <div
+      className={`app template-app ${navCollapsed ? 'nav-collapsed' : ''}`}
+      inert={sessionExpired}
+    >
       <nav className="icon-rail" aria-label="Workspace navigation">
         <button
           className="rail-brand"
@@ -298,6 +407,17 @@ export function App() {
           onClick={() => setDialog({ type: 'settings' })}
         >
           <Settings2 size={18} />
+        </button>
+        {user && (
+          <button
+            aria-label="Change password"
+            onClick={() => setChangingPassword(true)}
+          >
+            <KeyRound size={18} />
+          </button>
+        )}
+        <button aria-label="Sign out" onClick={() => void signOut()}>
+          <LogOut size={18} />
         </button>
       </nav>
       <button
@@ -447,6 +567,16 @@ export function App() {
             <small>{state.memories.length}</small>
           </button>
           <button
+            className={`nav-item ${view === 'skills' ? 'active' : ''}`}
+            onClick={() => {
+              setView('skills');
+              setMobile(false);
+            }}
+          >
+            <Puzzle size={17} />
+            <span>Skills & MCP</span>
+          </button>
+          <button
             className="nav-item"
             onClick={() => setDialog({ type: 'settings' })}
           >
@@ -491,7 +621,9 @@ export function App() {
                   ? 'Activity'
                   : view === 'space'
                     ? 'Pages'
-                    : 'Memories'}
+                    : view === 'skills'
+                      ? 'Skills & MCP'
+                      : 'Memories'}
             </strong>
           </div>
           <div className="top-actions">
@@ -540,30 +672,42 @@ export function App() {
           </div>
         )}
         {view === 'space' ? (
-          <SpaceWorkspace
-            key={spaceId}
-            space={
-              workspace.spaces.find((s) => s.id === spaceId) ??
-              workspace.spaces[0]
+          <Suspense
+            fallback={
+              <main className="spaces-surface library" aria-busy="true">
+                <div className="library-empty">
+                  <h2>Loading page…</h2>
+                </div>
+              </main>
             }
-            pageId={pageId}
-            workspace={workspace}
-            paused={state.settings.paused}
-            onPage={(id) => openPage(spaceId, id)}
-            onSettings={() => setDialog({ type: 'settings' })}
-            onCreateDot={() => setDialog({ type: 'dot', spaceId })}
-            onDirty={setDirtyPage}
-            onRefresh={refresh}
-            onSchedule={(threadId) => setDialog({ type: 'schedule', threadId })}
-            onThread={(id) => {
-              const target = workspace.conversations.find((t) => t.id === id);
-              if (target) {
-                setView('chat');
-                setSelectedDot(target.dotId);
-                setSelectedThread(id);
+          >
+            <SpaceWorkspace
+              key={spaceId}
+              space={
+                workspace.spaces.find((s) => s.id === spaceId) ??
+                workspace.spaces[0]
               }
-            }}
-          />
+              pageId={pageId}
+              workspace={workspace}
+              paused={state.settings.paused}
+              onPage={(id) => openPage(spaceId, id)}
+              onSettings={() => setDialog({ type: 'settings' })}
+              onCreateDot={() => setDialog({ type: 'dot', spaceId })}
+              onDirty={setDirtyPage}
+              onRefresh={refresh}
+              onSchedule={(threadId) =>
+                setDialog({ type: 'schedule', threadId })
+              }
+              onThread={(id) => {
+                const target = workspace.conversations.find((t) => t.id === id);
+                if (target) {
+                  setView('chat');
+                  setSelectedDot(target.dotId);
+                  setSelectedThread(id);
+                }
+              }}
+            />
+          </Suspense>
         ) : view === 'chat' ? (
           <div className={`chat-workspace ${pane ? 'split' : ''}`}>
             <div className="chat-column">
@@ -572,6 +716,7 @@ export function App() {
                   key={thread.id}
                   thread={thread}
                   dot={dot}
+                  dots={workspace.dots}
                   initialPrompt={pendingPrompt}
                   onConsumed={() => setPendingPrompt(undefined)}
                   voiceReady={workspace.setup.voice}
@@ -691,16 +836,28 @@ export function App() {
               )}
             </div>
             {pane && (
-              <ResultPane
-                key={dot.id}
-                dots={workspace.dots}
-                defaultDotId={dot.id}
-                latest={capture}
-                dotState="idle"
-                onClose={() => setPane(false)}
-              />
+              <Suspense fallback={paneFallback}>
+                <ResultPane
+                  key={dot.id}
+                  dots={workspace.dots}
+                  defaultDotId={dot.id}
+                  latest={capture}
+                  dotState="idle"
+                  onClose={() => setPane(false)}
+                />
+              </Suspense>
             )}
           </div>
+        ) : view === 'skills' ? (
+          <Suspense
+            fallback={
+              <main className="main-content" aria-busy="true">
+                <p className="muted">Loading…</p>
+              </main>
+            }
+          >
+            <SkillsMcpView dots={workspace.dots} />
+          </Suspense>
         ) : (
           <main className="main-content">
             <div className="page-heading">
@@ -713,7 +870,7 @@ export function App() {
                 </h1>
                 <p>
                   {view === 'memories'
-                    ? 'Preferences you choose to share with your Dots.'
+                    ? 'What your Dots remember about you. Add, edit, or remove anything.'
                     : 'Scheduled turns run on the server in their original conversation.'}
                 </p>
               </div>
@@ -736,9 +893,17 @@ export function App() {
                       <p>{memory.text}</p>
                       <div>
                         <small>
-                          {state.settings.memoryAllowed
-                            ? 'Available to permitted Dots'
-                            : 'Memory use disabled'}
+                          {!state.settings.memoryAllowed
+                            ? 'Memory use disabled'
+                            : memory.dotId
+                              ? `Only ${workspace?.dots.find((dot) => dot.id === memory.dotId)?.name ?? 'a deleted Dot'}`
+                              : 'All permitted Dots'}
+                          {' · '}
+                          {memory.source === 'auto'
+                            ? 'Learned automatically'
+                            : memory.source === 'agent'
+                              ? 'Saved by a Dot'
+                              : 'Added by you'}
                         </small>
                         <button
                           className="icon-button"
@@ -765,8 +930,9 @@ export function App() {
                     <Mascot />
                     <h2>A little context goes a long way.</h2>
                     <p>
-                      Add a preference like “Keep my research briefs short.” You
-                      can change or remove it anytime.
+                      Add a preference like “Keep my research briefs short,” or
+                      tell a Dot “remember that…”. You can change or remove
+                      memories anytime.
                     </p>
                   </div>
                 )}
@@ -862,38 +1028,60 @@ export function App() {
         )}
         {pane && view !== 'chat' && (
           <div className="computer-overlay">
-            <ResultPane
-              key={view === 'space' ? spaceId : dot.id}
-              dots={workspace.dots}
-              defaultDotId={
-                view === 'space'
-                  ? (workspace.dots.find((candidate) =>
-                      candidate.spaceIds.includes(spaceId),
-                    )?.id ?? dot.id)
-                  : dot.id
-              }
-              dotState="idle"
-              onClose={() => setPane(false)}
-            />
+            <Suspense fallback={paneFallback}>
+              <ResultPane
+                key={view === 'space' ? spaceId : dot.id}
+                dots={workspace.dots}
+                defaultDotId={
+                  view === 'space'
+                    ? (workspace.dots.find((candidate) =>
+                        candidate.spaceIds.includes(spaceId),
+                      )?.id ?? dot.id)
+                    : dot.id
+                }
+                dotState="idle"
+                onClose={() => setPane(false)}
+              />
+            </Suspense>
           </div>
         )}
       </div>
       {dialog && (
-        <WorkspaceDialog
-          dialog={dialog}
-          state={state}
-          workspace={workspace}
-          onClose={() => setDialog(undefined)}
-          mutate={mutate}
-        />
+        <Suspense fallback={null}>
+          <WorkspaceDialog
+            dialog={dialog}
+            state={state}
+            workspace={workspace}
+            onClose={() => setDialog(undefined)}
+            mutate={mutate}
+          />
+        </Suspense>
       )}
     </div>
   );
-  return configured ? (
-    <CopilotKitProvider runtimeUrl="/api/copilotkit" headers={authHeaders()}>
+  const shell = sessionExpired ? (
+    <>
       {content}
-    </CopilotKitProvider>
+      <div
+        className="session-overlay"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Session expired"
+      >
+        <LoginScreen
+          onSignedIn={signedIn}
+          notice="Your session ended. Sign in again — your open drafts are still here."
+        />
+      </div>
+    </>
   ) : (
     content
+  );
+  return configured ? (
+    <CopilotKitProvider runtimeUrl="/api/copilotkit" credentials="same-origin">
+      {shell}
+    </CopilotKitProvider>
+  ) : (
+    shell
   );
 }

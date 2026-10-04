@@ -3,6 +3,7 @@ import { Store } from '../src/server/store.js';
 import { WorkspaceStore } from '../src/server/workspace.js';
 import { VoiceService } from '../src/server/voice.js';
 import type { PlatformConfig } from '../src/server/platform-config.js';
+import type { CodexAuth } from '../src/server/providers/codex-auth.js';
 const resources: (() => void)[] = [];
 afterEach(() => {
   resources.splice(0).forEach((close) => close());
@@ -29,6 +30,14 @@ function fixture() {
       'Current answer',
   );
   const history = vi.fn(async () => 'user: Earlier topic');
+  const setup = () => ({
+    voice: true,
+    intelligence: true,
+    model: true,
+    browser: false,
+    slack: 'not_configured' as const,
+    missing: [],
+  });
   const transport = vi.fn<typeof fetch>(async (url) =>
     String(url).endsWith('/hangup')
       ? new Response(null, { status: 200 })
@@ -44,18 +53,11 @@ function fixture() {
       turn,
       history,
       requireReady() {},
-      setup: () => ({
-        voice: true,
-        intelligence: true,
-        model: true,
-        browser: false,
-        slack: 'not_configured',
-        missing: [],
-      }),
+      setup,
     },
     transport,
   );
-  return { voice, transport, workspace, store, turn, history };
+  return { voice, transport, workspace, store, turn, history, config, setup };
 }
 const offer = 'v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111';
 it('binds voice history and compute to the existing thread, deduplicates tools and hangs up remotely', async () => {
@@ -105,7 +107,7 @@ it('rejects unowned threads before provider contact and expires unactivated peer
     offer,
     new AbortController().signal,
   );
-  await vi.advanceTimersByTimeAsync(30_001);
+  await vi.advanceTimersByTimeAsync(45_001);
   expect(f.workspace.call(call.id).status).toBe('failed');
   expect(
     f.transport.mock.calls.some(([url]) => String(url).endsWith('/hangup')),
@@ -154,7 +156,7 @@ it('saves a late transcript after expiry without changing the ended status or du
     offer,
     new AbortController().signal,
   );
-  await vi.advanceTimersByTimeAsync(30_001);
+  await vi.advanceTimersByTimeAsync(45_001);
   const expired = f.workspace.call(call.id);
   await f.voice.end(call.id, 'Buffered speech at disconnect');
   await f.voice.end(call.id, 'Buffered speech at disconnect');
@@ -246,5 +248,59 @@ it('sanitizes custom provider transport error names', async () => {
   const ended = await f.voice.end(call.id, 'Confirmed discussion');
   expect(ended.error).toBe(
     'The local call stopped, but provider hangup failed (transport error).',
+  );
+});
+it('includes permitted memories in the voice instructions', async () => {
+  const f = fixture();
+  const dot = f.workspace.dots()[0];
+  f.store.saveMemory({ text: 'Owner prefers Portuguese' });
+  f.store.saveMemory({ text: 'Only for another Dot', dotId: 'other-dot' });
+  await f.voice.begin('thread', offer, new AbortController().signal);
+  const session = String(
+    (f.transport.mock.calls[0][1]?.body as FormData).get('session'),
+  );
+  expect(session).toContain('Owner prefers Portuguese');
+  expect(session).not.toContain('Only for another Dot');
+  await f.voice.end(f.workspace.calls()[0].id, '');
+  f.workspace.updateDot(dot.id, { ...dot, memoryAllowed: false });
+  await f.voice.begin('thread', offer, new AbortController().signal);
+  const withoutMemory = String(
+    (f.transport.mock.calls.at(-1)?.[1]?.body as FormData).get('session'),
+  );
+  expect(withoutMemory).not.toContain('Owner prefers Portuguese');
+});
+it('lets ChatGPT voice calls delegate tasks to the Dot agent', async () => {
+  const f = fixture();
+  const codex = {
+    credential: () => ({ state: 'connected' }),
+    accessToken: async () => ({ token: 'chatgpt-token' }),
+  } as unknown as CodexAuth;
+  const voice = new VoiceService(
+    {
+      workspace: f.workspace,
+      store: f.store,
+      config: { ...f.config, voiceKey: undefined, voiceModel: undefined },
+      turn: f.turn,
+      history: f.history,
+      requireReady() {},
+      setup: f.setup,
+    },
+    f.transport,
+    codex,
+  );
+  const call = await voice.begin('thread', offer, new AbortController().signal);
+  expect(call.backend).toBe('chatgpt');
+  const { session } = JSON.parse(String(f.transport.mock.calls[0][1]?.body));
+  expect(session.delegation).toEqual({ type: 'client', ack_filler: true });
+  expect(session.instructions).toContain('Delegate every action');
+  expect(session.instructions).not.toContain('never delegate');
+  await expect(voice.compute(call.id, 'del_1', 'Make a page')).resolves.toBe(
+    'Current answer',
+  );
+  expect(f.turn).toHaveBeenCalledWith(
+    'thread',
+    'Make a page',
+    expect.any(AbortSignal),
+    { opendotsSource: 'voice_compute' },
   );
 });

@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import type { Dot, Memory, State, WorkspaceState } from '../shared/types';
+import type { ProviderId } from '../shared/providers';
+import { CodexConnect, ModelProviderFields } from './ModelProviderFields';
+import { isCoarsePointer } from './ui-helpers';
 export type Dialog =
   | { type: 'space' }
   | { type: 'dot'; dot?: Dot; spaceId: string }
@@ -47,11 +50,35 @@ export function WorkspaceDialog({
     dialog.type === 'dot' ? (dialog.dot?.spaceId ?? dialog.spaceId) : '',
   );
   const [interval, setInterval] = useState('86400');
+  const [memoryDot, setMemoryDot] = useState(
+    dialog.type === 'memory' ? (dialog.memory?.dotId ?? '') : '',
+  );
+  const [autoMemory, setAutoMemory] = useState(
+    state.settings.autoMemory !== false,
+  );
   const [learningContainer, setLearningContainer] = useState(
     dialog.type === 'dot' ? (dialog.dot?.learningContainerId ?? '') : '',
   );
+  const [delegation, setDelegation] = useState(
+    dialog.type === 'dot' ? (dialog.dot?.delegationAllowed ?? true) : true,
+  );
+  const [skillAuthoring, setSkillAuthoring] = useState(
+    dialog.type === 'dot' ? (dialog.dot?.skillAuthoringAllowed ?? true) : true,
+  );
   const [skillDelivery, setSkillDelivery] = useState(
     dialog.type === 'dot' ? (dialog.dot?.skillDeliveryEnabled ?? false) : false,
+  );
+  const [provider, setProvider] = useState<ProviderId | ''>(
+    (dialog.type === 'dot'
+      ? dialog.dot?.provider
+      : state.settings.modelProvider) ?? '',
+  );
+  const [model, setModel] = useState(
+    (dialog.type === 'dot' ? dialog.dot?.model : state.settings.model) ?? '',
+  );
+  const providers = workspace.setup.providers ?? [];
+  const defaultProvider = providers.find(
+    (item) => item.id === workspace.setup.defaultProvider?.provider,
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -61,9 +88,11 @@ export function WorkspaceDialog({
       document.activeElement instanceof HTMLElement
         ? document.activeElement
         : null;
-    container.current
-      ?.querySelector<HTMLElement>('input,textarea,select')
-      ?.focus();
+    // On touch devices focusing would pop the keyboard over the dialog.
+    if (!isCoarsePointer())
+      container.current
+        ?.querySelector<HTMLElement>('input,textarea,select')
+        ?.focus();
     const key = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose();
       if (event.key === 'Tab') {
@@ -142,19 +171,29 @@ export function WorkspaceDialog({
                 memoryAllowed: memory,
                 learningContainerId: learningContainer.trim() || null,
                 skillDeliveryEnabled: skillDelivery,
+                delegationAllowed: delegation,
+                skillAuthoringAllowed: skillAuthoring,
+                provider: provider || null,
+                model: model.trim() || null,
               };
             }
             if (dialog.type === 'settings') {
               path = '/settings';
               method = 'PATCH';
-              body = { researchAllowed: research, memoryAllowed: memory };
+              body = {
+                researchAllowed: research,
+                memoryAllowed: memory,
+                autoMemory,
+                modelProvider: provider || null,
+                model: model.trim() || null,
+              };
             }
             if (dialog.type === 'memory') {
               path = dialog.memory
                 ? `/memories/${dialog.memory.id}`
                 : '/memories';
               method = dialog.memory ? 'PUT' : 'POST';
-              body = { text };
+              body = { text, dotId: memoryDot || null };
             }
             if (dialog.type === 'schedule') {
               path = '/tasks';
@@ -208,6 +247,25 @@ export function WorkspaceDialog({
                     : ''
                 }
               />
+            </>
+          )}
+          {dialog.type === 'memory' && (
+            <>
+              <label className="field-label" htmlFor="memory-scope">
+                Who can use it
+              </label>
+              <select
+                id="memory-scope"
+                value={memoryDot}
+                onChange={(event) => setMemoryDot(event.target.value)}
+              >
+                <option value="">Every Dot</option>
+                {workspace.dots.map((dot) => (
+                  <option key={dot.id} value={dot.id}>
+                    Only {dot.name}
+                  </option>
+                ))}
+              </select>
             </>
           )}
           {dialog.type === 'dot' && (
@@ -280,13 +338,99 @@ export function WorkspaceDialog({
                 <span>
                   <strong>Use saved memories</strong>
                   <small>
-                    Include your preferences in new turns. Changing permission
-                    stops active work.
+                    Include saved memories in new turns and let the Dot save,
+                    update, or forget them. Changing permission stops active
+                    work.
                   </small>
                 </span>
               </label>
+              {dialog.type === 'dot' && (
+                <label className="permission-row">
+                  <input
+                    type="checkbox"
+                    checked={delegation}
+                    onChange={(e) => setDelegation(e.target.checked)}
+                  />
+                  <span>
+                    <strong>Delegate to other Dots</strong>
+                    <small>
+                      Let this Dot hand sub-tasks to other Dots on its own. Each
+                      delegate works in its own conversation under its own
+                      permissions, so it may use tools this Dot lacks.
+                    </small>
+                  </span>
+                </label>
+              )}
+              {dialog.type === 'dot' && (
+                <label className="permission-row">
+                  <input
+                    type="checkbox"
+                    checked={skillAuthoring}
+                    onChange={(e) => setSkillAuthoring(e.target.checked)}
+                  />
+                  <span>
+                    <strong>Create skills</strong>
+                    <small>
+                      Let this Dot save new skills and improve the ones it
+                      wrote. Its skills stay private to it until you share them
+                      in Skills &amp; MCP.
+                    </small>
+                  </span>
+                </label>
+              )}
+              {dialog.type === 'settings' && (
+                <label className="permission-row">
+                  <input
+                    type="checkbox"
+                    checked={autoMemory}
+                    disabled={!memory}
+                    onChange={(e) => setAutoMemory(e.target.checked)}
+                  />
+                  <span>
+                    <strong>Learn memories automatically</strong>
+                    <small>
+                      After each chat turn, ask the model for lasting facts
+                      about you and save them. Uses one extra model call per
+                      turn.
+                    </small>
+                  </span>
+                </label>
+              )}
             </>
           )}
+          {(dialog.type === 'dot' || dialog.type === 'settings') &&
+            providers.length > 0 && (
+              <fieldset className="space-access-fields">
+                <legend>
+                  {dialog.type === 'dot' ? 'Model' : 'Model provider'}
+                </legend>
+                <ModelProviderFields
+                  providers={providers}
+                  provider={provider}
+                  model={model}
+                  onProvider={setProvider}
+                  onModel={setModel}
+                  inheritProvider={workspace.setup.defaultProvider?.provider}
+                  inheritModel={
+                    dialog.type === 'dot'
+                      ? workspace.setup.defaultProvider?.model
+                      : undefined
+                  }
+                  inheritLabel={
+                    dialog.type === 'dot'
+                      ? `Workspace default${defaultProvider ? ` (${defaultProvider.label})` : ''}`
+                      : 'Automatic (first ready provider)'
+                  }
+                />
+                {dialog.type === 'settings' && (
+                  <CodexConnect
+                    status={providers.find(
+                      (item) => item.id === 'openai-codex',
+                    )}
+                  />
+                )}
+              </fieldset>
+            )}
           {dialog.type === 'dot' && (
             <fieldset className="space-access-fields">
               <legend>Automatic Learning</legend>
@@ -363,7 +507,9 @@ export function WorkspaceDialog({
               <strong>Service setup</strong>
               <p>
                 {workspace.setup.missing.length
-                  ? `Add ${workspace.setup.missing.join(', ')} to the server environment, then restart.`
+                  ? workspace.setup.missing.includes('ChatGPT sign-in')
+                    ? `Missing: ${workspace.setup.missing.join(', ')}. Sign in with ChatGPT above, or add the variables to the server environment and restart.`
+                    : `Add ${workspace.setup.missing.join(', ')} to the server environment, then restart${providers.some((item) => item.id === 'openai-codex') ? ', or sign in with ChatGPT above and choose it as the provider' : ''}.`
                   : 'Text configuration is present. A successful conversation confirms connectivity.'}
               </p>
               <p>
@@ -384,7 +530,8 @@ export function WorkspaceDialog({
           )}
           {dialog.type === 'memory' && (
             <p className="muted">
-              Memories are explicit preferences, not automatic learning. Avoid
+              Dots also save memories when you ask them to remember something,
+              and can learn them automatically if enabled in Settings. Avoid
               secrets; enabled memories go to your model provider.
             </p>
           )}

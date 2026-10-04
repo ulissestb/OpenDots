@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Store } from '../src/server/store.js';
+import {
+  Store,
+  eventHistoryLimit,
+  runHistoryLimit,
+} from '../src/server/store.js';
 
 const resources: { store: Store; dir: string }[] = [];
 function fixture() {
@@ -87,5 +91,82 @@ describe('durable task lifecycle', () => {
     expect(
       store.finish(recovered, { text: 'New', sources: [], sample: true }),
     ).toBe(true);
+  });
+});
+describe('recurring failures and history', () => {
+  it('keeps a recurring task scheduled after a failure, with backoff', () => {
+    const { store } = fixture();
+    const task = store.createTask('Daily research', 86_400);
+    const now = Date.now();
+    store.fail(store.claim(now)!, 'Model unavailable', now);
+    const failed = store.task(task.id)!;
+    expect(failed.status).toBe('failed');
+    expect(failed.error).toBe('Model unavailable');
+    expect(failed.nextRunAt).toBe(now + 60_000);
+    expect(store.claim(now + 59_000)).toBeNull();
+    const retry = store.claim(now + 60_000)!;
+    expect(retry.id).toBe(task.id);
+    // A second consecutive failure doubles the wait.
+    store.fail(retry, 'Model unavailable', now + 60_000);
+    expect(store.task(task.id)?.nextRunAt).toBe(now + 180_000);
+    // Success resets to the normal interval.
+    const third = store.claim(now + 180_000)!;
+    store.finish(
+      third,
+      { text: 'Recovered', sources: [], sample: true },
+      now + 180_000,
+    );
+    expect(store.task(task.id)?.nextRunAt).toBe(now + 180_000 + 86_400_000);
+  });
+  it('caps the retry wait at the task interval', () => {
+    const { store } = fixture();
+    const task = store.createTask('Frequent research', 90);
+    let now = Date.now();
+    for (let i = 0; i < 3; i++) {
+      store.fail(store.claim(now)!, 'Failed', now);
+      now = store.task(task.id)!.nextRunAt!;
+    }
+    const last = store.task(task.id)!;
+    expect(last.nextRunAt! - last.updatedAt).toBe(90_000);
+  });
+  it('ends a one-off task on failure', () => {
+    const { store } = fixture();
+    const task = store.createTask('Once');
+    const now = Date.now();
+    store.fail(store.claim(now)!, 'Failed', now);
+    expect(store.task(task.id)?.nextRunAt).toBeNull();
+    expect(store.claim(now + 10 * 86_400_000)).toBeNull();
+  });
+  it('pausing or cancelling a failed recurring task stops its retries', () => {
+    const { store } = fixture();
+    const task = store.createTask('Daily research', 86_400);
+    const now = Date.now();
+    store.fail(store.claim(now)!, 'Failed', now);
+    store.action(task.id, 'pause');
+    expect(store.claim(now + 86_400_000)).toBeNull();
+  });
+  it('prunes old runs and events per task', () => {
+    const { store } = fixture();
+    const task = store.createTask('Frequent research', 60);
+    let now = Date.now();
+    for (let i = 0; i < runHistoryLimit + 5; i++) {
+      const claim = store.claim(now)!;
+      store.finish(claim, { text: `Run ${i}`, sources: [], sample: true }, now);
+      now += 60_000;
+    }
+    const detail = store.detail(task.id)!;
+    expect(detail.runs).toHaveLength(runHistoryLimit);
+    expect(detail.runs[0].result?.text).toBe(`Run ${runHistoryLimit + 4}`);
+    expect(detail.events.length).toBeLessThanOrEqual(eventHistoryLimit);
+    for (let i = 0; i < eventHistoryLimit + 10; i++)
+      store.event(task.id, null, `Progress ${i}`);
+    store.finish(
+      store.claim(now)!,
+      { text: 'Last', sources: [], sample: true },
+      now,
+    );
+    const events = store.detail(task.id)!.events;
+    expect(events).toHaveLength(eventHistoryLimit);
+    expect(events.at(-1)?.text).toBe('Fictional sample brief ready.');
   });
 });

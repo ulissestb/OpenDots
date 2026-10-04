@@ -8,6 +8,8 @@ export interface Config extends WebConfig {
   model?: string;
   browserUrl?: string;
   browserSecret?: string;
+  /** Agent turn budget; scheduled runs and leases are derived from it. */
+  runTimeoutMs?: number;
 }
 export const browserResponse = z.object({
   title: z.string(),
